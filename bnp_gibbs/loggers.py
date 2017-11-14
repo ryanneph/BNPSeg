@@ -18,6 +18,9 @@ def RotatingFile(fname, name=None, level=logging.INFO, backupCount=10):
     Args:
         logname (str): basename for the logfile that is initialized. Error log will have name:
             <logname>_Errors.log by default
+        name (str): name of logger
+        level (int): log level - less severe messages will be passed to parent logger or ignored
+        backupCount (int): number of log files to keep in rotation
     """
     basename = os.path.splitext(os.path.basename(fname))[0]
     dirname  = os.path.dirname(fname)
@@ -46,10 +49,9 @@ def RotatingFile(fname, name=None, level=logging.INFO, backupCount=10):
     logger.addHandler(err_rfh)
 
     # Initialize Loggers
-    os.makedirs(basename, exist_ok=True)
+    os.makedirs(dirname, exist_ok=True)
     rfh.doRollover()
     err_rfh.doRollover()
 
     # return loggers
     return logger
-

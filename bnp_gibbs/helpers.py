@@ -2,20 +2,91 @@ from math import pi, sqrt
 import numpy as np
 import numpy.random as rand
 from numpy.linalg import cholesky
-from scipy.special import gammaln
+from scipy import special
+from datetime import datetime
 
-def unStirling1st(n, m):
-    """Computes unsigned Stirling numbers of the 1st kind by recursion
-    see: https://en.wikipedia.org/wiki/Stirling_numbers_of_the_first_kind
-
-    Args:
-        n (int): # of elements
-        m (int): # of disjoint cycles
-
-    Returns:
-        float: Number of permutations of n elements having m disjoint cycles
+class DataAvg:
+    """Maintains running sum of data items and exposes insert/remove methods and value property for
+    on-the-fly average re-evaluation
     """
-    raise NotImplementedError()
+    def __init__(self, dim=1):
+        self._accumulator = np.zeros((dim,))
+        self._count = 0
+
+    def insert(self, v):
+        self._count += 1
+        self._accumulator += v
+
+    def remove(self, v):
+        self._count -= 1
+        self._accumulator -= v
+
+    @property()
+    def value(self):
+        return self._accumulator / self._count
+
+class DataOutProd:
+    """Maintains running outer product of data items and exposes insert/remove methods and value property"""
+    def __init__(self, dim=1):
+        self._accumulator = np.zeros((dim,dim))
+        self._count = 0
+
+    def insert(self, v):
+        self._count += 1
+        self._accumulator += np.outer(v, v)
+
+    def remove(self, v):
+        self._count -= 1
+        self._accumulator -= np.outer(v, v)
+
+    @property
+    def value(self):
+        return self._accumulator
+
+class unStirling1stProvider:
+    """implements on demand caching version of Unsigned Stirling Number (1st Kind) provider """
+
+    def __init__(self, precache_max=None, verbose=False):
+        self._cache = {}
+        if isinstance(precache_max, tuple) and len(precache_max) == 2:
+            tstart = datetime.now()
+            for n in range(precache_max[0]+1):
+                for m in range(precache_max[1]+1):
+                    self.get(n, m, verbose>1)
+            if verbose:
+                print(f'Stirling number provider pre-caching to (n={n}, m={m}) completed in'
+                      f' {(datetime.now()-tstart).microseconds/1000} ms')
+
+    def get(self, n, m, verbose=True):
+        try:
+            return self._cache[(n,m)]
+        except:
+            val = self._eval(n, m)
+            self._cache[(n, m)] = val
+            if verbose: print(f'added value to cache: ({n}, {m})={val}')
+            return val
+
+    def _eval(self, n, m):
+        """Computes unsigned Stirling numbers of the 1st kind by recursion
+        see: https://en.wikipedia.org/wiki/Stirling_numbers_of_the_first_kind
+
+        Args:
+            n (int): # of elements
+            m (int): # of disjoint cycles
+
+        Returns:
+            float: Number of permutations of n elements having m disjoint cycles
+        """
+        n1, m1 = n, m
+        if n<=0:              return 1
+        elif m<=0:            return 0
+        elif (n==0 and m==0): return -1
+        elif n!=0 and n==m:   return 1
+        elif n<m:             return 0
+        else:
+            temp1=self.get(n1-1,m1)
+            temp1=m1*temp1
+            return (m1*(self.get(n1-1,m1)))+self.get(n1-1,m1-1)
 
 def gammaln(x):
     """computes natural log of the gamma function which is more numerically stable than the gamma
@@ -23,8 +94,7 @@ def gammaln(x):
     Args:
         x (float): any real value
     """
-    return gammaln(x)
-
+    return special.gammaln(x)
 
 def choleskyR1Update(L, x):
     """Compute rank 1 update of the Lower Triangular matrix resulting from the Cholesky decomposition
@@ -122,12 +192,11 @@ def marginalLikelihood(x, n_0, k_0, mu_0, ):
 
 
     """
-
     eps = 1e-9  # prevent divide-by-zero errors
     d   = 3
     sig = np.zeros((3,3))
 
-    # intermediate steps
+    # intermediate steps - T-dist inputs
     nu = n_m - d + 1
     mu = mu_m
     b  = x - mu

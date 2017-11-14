@@ -21,3 +21,16 @@ class Variable(MutableSequence):
 
     def __len__(self):
         return len(self._trace)
+
+    def insert(self, i, v):
+        self._trace.insert(i, v)
+
+    @property
+    def value(self):
+        """get the most recently inserted value (current value)"""
+        return self.__getitem__(-1)
+
+    @value.setter
+    def value(self, v):
+        self.__setitem__(-1, v)
+
