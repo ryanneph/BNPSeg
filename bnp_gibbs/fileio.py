@@ -5,7 +5,7 @@ from PIL import Image
 from matplotlib import pyplot as plt
 from loggers import RotatingFile
 
-def loadImageSet(dname, verbose=False, interactive=False):
+def loadImageSet(dname, verbose=False, interactive=False, ftype='float32', normalize=True):
     """load a set of rgb images conatained within a single directory's top level
     Each image is loaded using PIL as an rgb image then linearized into a matrix [shape=(N,D)] containing N
     pixels in row-major (zyx) order, and D-dimensional pixel appearance features
@@ -27,6 +27,7 @@ def loadImageSet(dname, verbose=False, interactive=False):
                 dim = 4
             else:
                 raise RuntimeError(f"Couldn't determine dimensionality of image with mode=\"{im.mode!s}\"")
+            maxint = 255 # assume all 8-bit per channel
 
             if common_dim is None:
                 common_dim = dim
@@ -34,9 +35,14 @@ def loadImageSet(dname, verbose=False, interactive=False):
                 raise RuntimeError(f"Dimensionality of image: \"{fname}\" (\"{im.mode}\":{dim}) \
                                    doesn't match dataset dimensionality ({common_dim})")
 
-            arr = np.rollaxis(np.array(im), 2).reshape((dim, -1)).T
+            arr = np.rollaxis(np.array(im), 2).reshape((dim, -1)).T.astype(ftype)
+            if normalize:
+                # normalize to [0,1]
+                for i in range(dim):
+                    arr[:,i] = arr[:,i] / maxint
+
             if interactive:
-                plotRGB(np.array(im))
+                plotRGB(np.moveaxis(arr.T.reshape((dim, *im.size[::-1])), 0, 2))
                 plt.show()
             ims.append(arr)
             if verbose: print(f'loaded image: {fname}, shape=({arr.shape})')
