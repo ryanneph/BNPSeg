@@ -5,9 +5,11 @@ import math
 import numpy as np
 from PIL import Image
 from matplotlib import pyplot as plt
-from loggers import RotatingFile
+import logging
 
-def loadImageSet(dname, verbose=False, interactive=False, ftype='float32', normalize=True, resize=None):
+logger = logging.getLogger(__name__)
+
+def loadImageSet(dname, interactive=False, ftype='float32', normalize=True, resize=None):
     """load a set of rgb images conatained within a single directory's top level
     Each image is loaded using PIL as an rgb image then linearized into a matrix [shape=(N,D)] containing N
     pixels in row-major (zyx) order, and D-dimensional pixel appearance features
@@ -29,14 +31,16 @@ def loadImageSet(dname, verbose=False, interactive=False, ftype='float32', norma
             elif im.mode in ['RGBA', 'CMYK']:
                 dim = 4
             else:
-                raise RuntimeError(f"Couldn't determine dimensionality of image with mode=\"{im.mode!s}\"")
+                raise RuntimeError("Couldn't determine dimensionality of image with mode=\"{!s}\"".format(im.mode))
             maxint = 255 # assume all 8-bit per channel
 
             if common_dim is None:
                 common_dim = dim
             elif dim != common_dim:
-                raise RuntimeError(f"Dimensionality of image: \"{fname}\" (\"{im.mode}\":{dim}) \
-                                   doesn't match dataset dimensionality ({common_dim})")
+                raise RuntimeError(("Dimensionality of image: \"{fname}\" (\"{im.mode}\":{dim})" +
+                                   "doesn't match dataset dimensionality ({common_dim})").format(
+                                       fname, im.mode, dim, common_dim
+                                   ))
 
             # resize image
             if isinstance(resize, numbers.Number) and resize>0:
@@ -53,7 +57,7 @@ def loadImageSet(dname, verbose=False, interactive=False, ftype='float32', norma
                 plt.show()
             ims.append(arr)
             sizes.append(im.size[::-1])
-            if verbose: print(f'loaded image: {fname}, (h,w)={im.size}, shape=({arr.shape})')
+            logger.debug('loaded image: {}, (h,w)={}, shape=({})'.format(fname, im.size, arr.shape))
     return ims, sizes, common_dim
 
 def plotRGB(arr):

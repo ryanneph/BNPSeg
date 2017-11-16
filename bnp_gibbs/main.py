@@ -3,6 +3,7 @@ import sys
 import os.path
 import argparse
 import math
+import pickle
 import numpy as np
 import numpy.random as rand
 import matplotlib.pyplot as plt
@@ -10,12 +11,17 @@ from variable import Variable
 import fileio
 import loggers
 import helpers
+from notifications import pushNotification
 
 data_root = './test_files/'
 figs_dir  = './figures/'
 logs_dir  = './logs/'
+blobs_dir = './blobs/'
 
-if __name__ == '__main__':
+# setup logger
+logger = loggers.RotatingFile('./logs/main.log', level=loggers.INFO)
+
+def main():
     # arg defaults
     default_maxiter = 30
     default_ftype = 'float32'
@@ -29,7 +35,7 @@ if __name__ == '__main__':
     parser.add_argument('--visualize', action='store_true', default=default_visualize, help='produce intermediate/final result figures')
     parser.add_argument('--maxiter', type=int, default=default_maxiter)
     parser.add_argument('--dataset', type=str, choices=[x for x in os.listdir(data_root) if os.path.isdir(os.path.join(data_root, x))],
-                        default=default_dataset, help=f'named testing dataset in {data_root}')
+                        default=default_dataset, help='named testing dataset in {}'.format(data_root))
     parser.add_argument('--ftype', type=str, choices=['float32', 'float64'], default=default_ftype, help='set floating point bit-depth')
     # parse args
     args = parser.parse_args()
@@ -39,13 +45,19 @@ if __name__ == '__main__':
     verbose = args.verbose
     maxiter = args.maxiter
 
+    # reset logging level
+    if verbose == 1:
+        logger.setLevel(loggers.DEBUG)
+    elif verbose == 2:
+        logger.setLevel(loggers.DEBUG2)
+    elif verbose >= 3:
+        logger.setLevel(loggers.DEBUG3)
+
     # make output directories
     p_figs = os.path.join(figs_dir, args.dataset)
-    for dname in [data_root, p_figs, logs_dir]:
+    p_blobs = os.path.join(blobs_dir, args.dataset)
+    for dname in [data_root, p_figs, logs_dir, p_blobs]:
         os.makedirs(dname, exist_ok=True)
-
-    # setup logger
-    logger = loggers.RotatingFile('./logs/main.log', level=loggers.DEBUG)
 
     # standardize usage of float type according to '--ftype' arg
     def float(x):
@@ -53,17 +65,14 @@ if __name__ == '__main__':
 
     # semi-permanent settings
     rand.seed(21)
-    eps = float(1e-9)  # prevent divide-by-zero errors
-    m_sample_cap = 40
-
 
     # load data - load each image as a separate group (j)
-    if verbose: logger.debug(f'loading images from {datapath}.....')
-    docs, sizes, dim = fileio.loadImageSet(datapath, verbose>1, ftype=ftype, resize=0.15)
+    logger.info('loading images from {}.....'.format(datapath))
+    docs, sizes, dim = fileio.loadImageSet(datapath, ftype=ftype, resize=0.50)
     Nj = len(docs)                       # number of images
     Ni = [doc.shape[0] for doc in docs]  # list of image sizes (linear)
     totaldataitems = np.sum(Ni)
-    if verbose: logger.debug(f'found {len(docs)} images with dim={dim}')
+    logger.info('found {} images with dim={}'.format(len(docs), dim))
 
     # initialize caching provider of Stirling Numbers
     #  stirling.fillCache(1000, 40, verbose>1)
@@ -129,7 +138,7 @@ if __name__ == '__main__':
 
     # Sampling
     for ss_iter in range(maxiter):
-        if verbose: logger.debug(f'Beginning Sampling Iteration {ss_iter+1}')
+        logger.debug('Beginning Sampling Iteration {}'.format(ss_iter+1))
 
         # generate random permutation over document indices and iterate
         for j in rand.permutation(Nj):
@@ -139,7 +148,7 @@ if __name__ == '__main__':
 
             # gen. rand. permutation over elements in document
             for i in rand.permutation(Ni[j]):
-                if verbose>2: logger.debug(f'ss_iter={ss_iter}, j={j}, i={i}')
+                logger.debug3('ss_iter={}, j={}, i={}'.format(ss_iter, j, i))
                 data = docs[j][i,:]
 
                 # get previous assignments
@@ -149,10 +158,10 @@ if __name__ == '__main__':
 
                 # remove count from group tprev, class kprev
                 n[j][tprev] -= 1
-                if verbose>2: logger.debug(f'n[{j}][{tprev}]-- -> {n[j][tprev]}')
+                logger.debug3('n[{}][{}]-- -> {}'.format(j, tprev, n[j][tprev]))
                 # handle empty group in doc j
                 if isGroupEmpty(j, tprev):
-                    if verbose>1: logger.debug(f'Group {tprev} in doc {j} emptied')
+                    logger.debug2('Group {} in doc {} emptied'.format(tprev, j))
                     n[j][tprev] = 0 # probably not necessary
                     m[kprev] -= 1
                     #  del n[j][tprev]       # forget number of data items in empty group
@@ -160,7 +169,7 @@ if __name__ == '__main__':
 
                     # handle empty global cluster
                     if isClassEmpty(kprev):
-                        if verbose>1: logger.debug(f'Cluster {kprev} emptied')
+                        logger.debug2('Cluster {} emptied'.format(kprev))
                         #  del m[kprev]
                         #  del evidence[kprev]
 
@@ -181,32 +190,34 @@ if __name__ == '__main__':
                 mrf_args = (i, t_coll[j].value, sizes[j], mrf_lbd)
                 tnext = helpers.sampleT(n[j], k_coll[j].value, beta.value, hp_a0, margL, margL_prior, mrf_args)
                 t_coll[j].value[i] = tnext
-                if verbose>2: logger.debug(f'tnext={tnext} of [0..{Nt-1}] ({Nt-np.count_nonzero(n[j])} empty)')
+                logger.debug3('tnext={} of [0..{}] ({} empty)'.format( tnext, Nt-1, Nt-np.count_nonzero(n[j]) ))
 
                 # conditionally sample knext if tnext=tnew
-                if verbose>2: logger.debug(f'tnext={tnext}, Nt={Nt}')
+                logger.debug3('tnext={}, Nt={}'.format(tnext, Nt))
                 if tnext >= Nt:
                     n[j].append(1)
-                    if verbose>1: logger.debug(f'new group created: t[{j}][{tnext}]; {np.count_nonzero(n[j])} active groups in doc {j} (+{Nt+1-np.count_nonzero(n[j])} empty)')
+                    logger.debug2('new group created: t[{}][{}]; {} active groups in doc {} (+{} empty)'.format(
+                        j, tnext, np.count_nonzero(n[j]), j, Nt+1-np.count_nonzero(n[j]) ))
                     knext = helpers.sampleK(beta.value, margL, margL_prior)
                     k_coll[j].value.append(knext)
-                    if verbose>2: logger.debug(f'knext={knext} of [0..{Nk-1}] ({Nk-np.count_nonzero(m)} empty)')
+                    logger.debug3('knext={} of [0..{}] ({} empty)'.format(knext, Nk-1, Nk-np.count_nonzero(m)))
                     if knext >= Nk:
                         m.append(1)
-                        if verbose>1: logger.debug(f'new class created: k[{knext}]; {np.count_nonzero(m)} active classes (+{Nk+1-np.count_nonzero(m)} empty)')
+                        logger.debug2('new class created: k[{}]; {} active classes (+{} empty)'.format(
+                            knext, np.count_nonzero(m), Nk+1-np.count_nonzero(m)))
                         evidence.append(helpers.ModelEvidence(dim=dim, covariance=hp_lbdinv))
                     else:
                         m[knext] += 1
-                    if verbose>2: logger.debug(f'm[{knext}]++ -> {m[knext]}')
+                    logger.debug3('m[{}]++ -> {}'.format(knext, m[knext]))
                 else:
                     n[j][tnext] += 1
-                    if verbose>2: logger.debug(f'n[{j}][{tnext}]++ -> {n[j][tnext]}')
+                    logger.debug3('n[{}][{}]++ -> {}'.format(j, tnext, n[j][tnext]))
                     knext = k_coll[j].value[tnext]
 
                 # insert data into newly assigned cluster evidence
                 evidence[knext].insert(data)
 
-                if verbose>2: logger.debug()
+                logger.debug3('')
 
         # sample beta
         beta.rollover()
@@ -215,13 +226,26 @@ if __name__ == '__main__':
         # display
         if visualize:
             tcollection = [np.array(t_coll[j].value).reshape(sizes[j]) for j in range(Nj)]
-            fname = os.path.join(p_figs, f'iter_{ss_iter+1}_t')
+            fname = os.path.join(p_figs, 'iter_{}_t'.format(ss_iter+1))
             fileio.savefigure(tcollection, fname)
 
             kcollection = [helpers.constructfullKMap(tcollection[j], k_coll[j].value) for j in range(Nj)]
-            fname = os.path.join(p_figs, f'iter_{ss_iter+1}_k')
+            fname = os.path.join(p_figs, 'iter_{}_k'.format(ss_iter+1))
             fileio.savefigure(kcollection, fname)
 
 
     # report final groups and classes
 
+
+    with open(os.path.join(p_blobs, 'data.pickle' ), 'wb') as f:
+        pickle.dump([t_coll, k_coll, sizes], f)
+
+
+if __name__ == '__main__':
+    try:
+        main()
+        pushNotification('Success - {}'.format(__name__), 'finished sampling')
+    except Exception as e:
+        msg = 'Exception occured: {!s}'.format(e)
+        logger.exception(msg)
+        pushNotification('Exception - {}'.format(__name__), msg)

@@ -306,5 +306,3 @@ def constructfullKMap(tmap, kmap):
     for t, k in enumerate(kmap):
         newarr[tmap==t] = k
     return newarr
-
-
