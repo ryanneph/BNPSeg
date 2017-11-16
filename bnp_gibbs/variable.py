@@ -1,6 +1,8 @@
 """
 """
 from collections.abc import MutableSequence
+import copy
+import numpy as np
 
 class Variable(MutableSequence):
     """ state-space variable with sample trace storage """
@@ -24,6 +26,13 @@ class Variable(MutableSequence):
 
     def insert(self, i, v):
         self._trace.insert(i, v)
+
+    def rollover(self):
+        prev = self._trace[-1]
+        if isinstance(prev, np.ndarray):
+            self._trace.append(prev.copy())
+        else:
+            self._trace.append(copy.deepcopy(prev))
 
     @property
     def value(self):

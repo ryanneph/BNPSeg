@@ -1,11 +1,10 @@
 from math import pi, sqrt, log, exp
 import numpy as np
 import numpy.random as rand
-from numpy.linalg import cholesky
+from numpy.linalg import cholesky, solve
 from scipy import special
 from datetime import datetime
 import choldate
-
 
 class ModelEvidence:
     """Wrapper for updating cluster evidence through insertion/removal operations of each data item
@@ -49,15 +48,13 @@ class ModelEvidence:
         self._count += 1
         self._insert_sum(x)
         self._insert_outprod(x)
-        diff = self.mu_m - x
-        self._insert_cholcov( sqrt((self.k_0 + self._count + 1)/(self.k_0 + self._count)) * diff )
+        self._insert_cholcov(x)
 
     def remove(self, x):
         self._count -= 1
         self._remove_sum(x)
         self._remove_outprod(x)
-        add = self.mu_m + x
-        self._remove_cholcov( sqrt((self.k_0 + self._count - 1)/(self.k_0 + self._count)) * add )
+        self._remove_cholcov(x)
 
     def _insert_sum(self, x):
         self._sum += x
@@ -72,15 +69,22 @@ class ModelEvidence:
         self._outprod -= np.outer(x, x)
 
     def _insert_cholcov(self, v):
-        choldate.cholupdate(self._cholcov, v)
+        # count has already been incremented by 1, so we subtract 1 from each count
+        choldate.cholupdate(self._cholcov, sqrt((self.k_0 + self._count)/(self.k_0 + self._count-1)) * (self.mu_m - v) )
 
     def _remove_cholcov(self, v):
-        choldate.choldowndate(self._cholcov, v)
+        # count has already been decremented by 1, so we add 1 from each count
+        choldate.choldowndate(self._cholcov, sqrt((self.k_0 + self._count)/(self.k_0 + self._count+1)) * (self.mu_m + v) )
 
     @property
     def count(self):
         return self._count
 
+    @property
+    def dim(self):
+        return self._dim
+
+    # Model Parameter Updates
     @property
     def n_m(self):
         return self.n_0 + self.count
@@ -95,12 +99,10 @@ class ModelEvidence:
 
     @property
     def cholcov_m(self):
+        # return lower triangular matrix L
         return self._cholcov.T
 
-    @property
-    def avg(self):
-        return self._sum / self._count
-
+    # Class Evidence States
     @property
     def sum(self):
         return self._sum
@@ -109,127 +111,11 @@ class ModelEvidence:
     def outprod(self):
         return self._outprod
 
-
-class DataAvg:
-    """Maintains running sum of data items and exposes insert/remove methods and value property for
-    on-the-fly average re-evaluation
-    """
-    def __init__(self, dim=1):
-        self._accumulator = np.zeros((dim,))
-        self._count = 0
-
-    def insert(self, v):
-        self._count += 1
-        self._accumulator += v
-
-    def remove(self, v):
-        self._count -= 1
-        self._accumulator -= v
-
+    # Convenience
     @property
-    def value(self):
-        return self._accumulator / self._count
+    def avg(self):
+        return self._sum / self._count
 
-class DataOuterProduct:
-    """Maintains running outer product of data items and exposes insert/remove methods and value property"""
-    def __init__(self, dim=1):
-        self._accumulator = np.zeros((dim,dim))
-        self._count = 0
-
-    def insert(self, v):
-        self._count += 1
-        self._accumulator += np.outer(v, v)
-
-    def remove(self, v):
-        self._count -= 1
-        self._accumulator -= np.outer(v, v)
-
-    @property
-    def value(self):
-        return self._accumulator
-
-class DataCholeskyCovariance:
-    """Maintains running Cholesky Decomposition of Covariance matrix that can be efficiently updated/downdated
-    using rank-1 Cholesky updates/downdates. Exposes insert/remove methods that implement the update/downdate
-    and a value property exposing the cholesky decomposed matrix
-    """
-    def __init__(self, Lstar=None, covariance=None, dim=1):
-        """Init from covariance, upper triangular cholesky decomp (Lstar) or zeros
-        Note: _accumulator is assumed to be the upper triangular cholesky decomp matrix
-        """
-        if Lstar:
-            self._accumulator = Lstar
-        elif covariance:
-            self._accumulator = cholesky(covariance).T
-        else:
-            self._accumulator = np.zeros(dim)
-        self._count = 0
-
-    def insert(self, v):
-        self._count += 1
-        choldate.cholupdate(self._accumulator, v.copy())
-
-    def remove(self, v):
-        self._count -=1
-        choldate.choldowndate(self._accumulator, v.copy())
-
-    @property
-    def value(self):
-        """Return lower triangular cholesky decomp matrix"""
-        return self._accumulator.T
-
-class unStirling1stProvider:
-    """implements on demand caching version of Unsigned Stirling Number (1st Kind) provider """
-
-    def __init__(self, precache_max=None, signed=False, verbose=False):
-        self._cache = {}
-        self._signed = signed
-        if isinstance(precache_max, tuple) and len(precache_max) == 2:
-            self.fillCache(*precache_max, verbose)
-
-    def fillCache(self, n_max, m_max, verbose):
-        """fill with cached values for all integer n, m up to provided values"""
-        tstart = datetime.now()
-        for n in range(n_max+1):
-            for m in range(m_max+1):
-                self.get(n, m, verbose>1)
-        if verbose:
-            print(f'Stirling number provider pre-caching to (n={n}, m={m}) completed in'
-                  f' {(datetime.now()-tstart).microseconds/1000} ms')
-
-
-    def get(self, n, m, verbose=False):
-        try:
-            return self._cache[(n,m)]
-        except:
-            val = self._eval(n, m)
-            if not self._signed:
-                val = abs(val)
-            self._cache[(n, m)] = val
-            if verbose: print(f'added value to cache: ({n}, {m})={val}')
-            return val
-
-    def _eval(self, n, m):
-        """Computes unsigned Stirling numbers of the 1st kind by recursion
-        see: https://en.wikipedia.org/wiki/Stirling_numbers_of_the_first_kind
-
-        Args:
-            n (int): # of elements
-            m (int): # of disjoint cycles
-
-        Returns:
-            float: Number of permutations of n elements having m disjoint cycles
-        """
-        n1, m1 = n, m
-        if n<=0:              return 1
-        elif m<=0:            return 0
-        elif (n==0 and m==0): return -1
-        elif n!=0 and n==m:   return 1
-        elif n<m:             return 0
-        else:
-            temp1=self.get(n1-1,m1)
-            temp1=m1*temp1
-            return (m1*(self.get(n1-1,m1)))+self.get(n1-1,m1-1)
 
 def gammaln(x):
     """computes natural log of the gamma function which is more numerically stable than the gamma
@@ -239,32 +125,6 @@ def gammaln(x):
     """
     return special.gammaln(x)
 
-def choleskyR1Update(L, x):
-    """Compute rank 1 update of the Lower Triangular matrix resulting from the Cholesky decomposition
-    of a Positive Definite matrix such that the result, L_up, is the cholesky decomp of A_up = A + x*x'
-
-    Args:
-        L (np.ndarray): Lower triangular matrix [shape=(d,d)]
-        x (np.ndarray): update vector [shape=(d,)]
-
-    Returns:
-        np.ndarray of same shape as L
-    """
-    raise NotImplementedError()
-
-def choleskyR1Downdate(L, x):
-    """Compute rank 1 downdate of the Lower Triangular matrix resulting from the Cholesky decomposition
-    of a Positive Definite matrix such that the result, L_dw, is the cholesky decomp of A_dw = A - x*x'
-
-    Args:
-        L (np.ndarray): Lower triangular matrix [shape=(d,d)]
-        x (np.ndarray): downdate vector [shape=(d,)]
-
-    Returns:
-        np.ndarray of same shape as L
-    """
-    raise NotImplementedError()
-
 def choleskyQuadForm(L, b):
     """Compute quadratic form: b' * A^(-1) * b  using the cholesky inverse to reduce the problem to solving Lx=b where L is the
     Lower triangular matrix resulting from the cholesky decomp of A
@@ -273,7 +133,8 @@ def choleskyQuadForm(L, b):
         L (np.ndarray): Lower triangular matrix [shape=(d,d)]
         b (np.ndarray): vector [shape=(d,)]
     """
-    raise NotImplementedError()
+    fsubLinvb = solve(L, b)
+    return fsubLinvb.dot(fsubLinvb)
 
 def choleskyLogDet(L):
     """Compute  ln(|A|) = 2*sum[i=1-->d]{ ln(L_[i,i]) } : twice the log sum of the diag. elements of L, the
@@ -285,7 +146,7 @@ def choleskyLogDet(L):
     Return:
         float
     """
-    raise NotImplementedError()
+    return np.sum(np.log(np.diagonal(L)))
 
 def sampleBern(p):
     """Samples from a bernoulli distribution parameterized by p (and q=1-p)
@@ -306,38 +167,9 @@ def sampleDir(alpha):
     Returns:
         np.ndarray with same size as input vector
     """
-    return rand.dirichlet(alpha)
+    return rand.dirichlet(alpha).tolist()
 
-def sampleM(a0, bk, njk, m_cap=20):
-    """produces sample from distribution over M using normalized log probabilities parameterizing a
-    categorical dist."""
-    raise DeprecationWarning()
-
-    wts = np.empty((m_cap,))
-    sum = 0
-    for m in range(m_cap):
-        wts[m] = gammaln(a0*bk) - gammaln(a0*bk+njk) + log(stirling.get(njk, m)+1e-9) + m*(a0+bk)
-        sum += wts[-1]
-    wts = np.array(wts) / sum
-    print(wts, np.sum(wts))
-    return rand.multinomial(1, wts)
-
-
-def sampleStudentT(loc, scale, df):
-    """samples from generalized student's T distribution that falls in the location-scale family of
-    distributions with 'df' degrees of freedom. As df->inf, the T-dist approaches the normal dist.
-    For smaller values of df, the T dist is like a normal dist. with heavier tails.
-
-    Args:
-        loc (np.ndarray):    location parameter vector [shape=(d,)]
-        scale (np.ndarray):  scale parameter matrix [shape=(d,d)]
-        df (np.ndarray):     degrees of freedom [shape=(d,)]
-    Returns:
-        np.ndarray with shape=(d,)
-    """
-    return loc + scale.dot( rand.standard_t(df) )
-
-def logMarginalLikelihood(x, evidence):
+def logMarginalLikelihood(x: np.ndarray, evidence: ModelEvidence):
     """Computes marginal likelihood for a data vector given the model evidence of a Gaussian-Wishart
     conjugate prior model using cholesky decmomposition of scaling matrix to increase efficiency.
 
@@ -352,73 +184,127 @@ def logMarginalLikelihood(x, evidence):
     Returns:
         float describing marginal likelihood that data x belongs to cluster k given model evidence avg
     """
-    eps = 1e-9  # prevent divide-by-zero errors
-    d   = x.shape[0]
-
-    # intermediate steps - bayesian param update
-    #    note here that m denotes number of evidence data items in each cluster k
+    # intermediate steps - bayesian param update is already stored in evidence
+    #    note here that m denotes number of evidence data items in each cluster k - not including x
+    d    = evidence.dim
     n_m  = evidence.n_m
     k_m  = evidence.k_m
     mu_m = evidence.mu_m
+    L    = evidence.cholcov_m
 
     # intermediate steps - T-dist inputs
     nu = n_m - d + 1
-    mu = mu_m
-    sig = inv( (k_m*(n_m-d+1))/(k_m+1) * lbd_m )
-    b  = x - mu
+    c = (k_m+1)/(k_m*nu)
 
     # compute student's T density given updated params
-    tdensln = gammaln((nu+d)/2) / ( gammaln(nu/2)*(nu*pi)**(d/2) * sqrt(choleskyLogDet(L)) + eps ) \
-            * (1 + (1/nu)*choleskyQuadForm(L,b) )**(-(nu+d)/2)
-
+    tdensln = gammaln(0.5*(nu + d)) - gammaln(0.5*nu) - (0.5*d)*(log(nu*pi) - log(c)) \
+            - choleskyLogDet(L) \
+            + (0.5*(1-n_m))*log(1+ (1/nu)*(1/c)*choleskyQuadForm(L, x-mu_m))
     return tdensln
 
-def logLikelihoodTnew(m, gamma, logMargL, logMargL_prior):
-    """calculate data likelihood given that data item belongs to new group
+def logLikelihoodTnew(beta, logMargL, logMargL_prior):
+    """calculate data likelihood given that data item belongs to new group tnew
+    computes: P(x_ji|tvect, t_ji=tnew, kvect)
 
     Args:
-        m (list): Nk length list containing number of groups assigned to cluster k in all docs
-        gamma (float): global DP param - concentration parameter (+real)
+        beta (list): Nk+1 length list containing DP sampled "number of groups" assigned to cluster k in all docs
+                     where the last element is beta_u: the DP sampled document concentration parameter
         logMargL (list): list of precomputed marginal likelihoods for each cluster k
         logMargL_prior (float): prior for data item given membership in new cluster knew
     """
-    # TODO: CHECK CORRECT
     val = 0
-    denom = np.array(m).sum() + gamma
-    for k in range(len(m)):
-        val += (exp(logMargL[k]) * m[k] )
-    val += gamma * exp(logMargL_prior)
-    val = log(val) - log(np.array(m).sum() + gamma)
+    for k in range(len(beta)-1):
+        if beta[k] <= 0:
+            continue
+        val += exp(logMargL[k]) * beta[k]
+    val += beta[-1] * exp(logMargL_prior)
+    val = log(val) - log(np.sum(beta))
     return val
 
-def sampleT(k_j, m, a0, gamma, logMargL, logMargL_prior):
+def sampleT(n_j, k_j, beta, a0, logMargL, logMargL_prior, mrf_args):
     """Draw t from a DP over Nt existing groups in the doc and one new group
 
     Args:
-        m (list): Nk length list containing number of groups assigned to cluster k in all docs
-        gamma (float): global DP param - concentration parameter (+real)
+        n_j (list):  Nt length list containing number of data items in group t in doc j
+        k_j (list):  Nt length list containing index of class assigned to group t in doc j
+        beta (list): Nk+1 length list containing DP sampled "number of groups" assigned to cluster k in all docs
+                     where the last element is beta_u: the DP sampled document concentration parameter
+
         logMargL (list): list of precomputed marginal likelihoods for each cluster k
         logMargL_prior (float): prior for data item given membership in new cluster knew
     """
-    # TODO: CHECK CORRECT
-    Nt = len(k_j)
+    (i, t_j, shape, lbd) = mrf_args
+
+    Nt = len(n_j)
     wts = np.zeros((Nt+1,))
     for t in range(Nt):
+        if n_j[t] <= 0:
+            continue
         # t=texist
-        k = k_j[t]
-        wts[t] = log(n[j][t]) + logMargL[k] + helpers.logMRF()
-    wts[Nt] = log(a0) + logLikelihoodTnew(m, gamma, logMargL, logMargL_prior) # t=tnew
+        wts[t] = log(n_j[t]) + logMargL[k_j[t]] + logMRF(i, t_j, shape, lbd)
+    wts[Nt] = log(a0) + logLikelihoodTnew(beta, logMargL, logMargL_prior) # t=tnew
     # normalize
     wts = wts / wts.sum()
-    print(f'sampleT - normalized with sum = {wts.sum()}')
     # draw t
-    tnext = rand.multinomial(1, wts)
+    tnext = np.nonzero(rand.multinomial(1, wts))[0][0]
     return tnext
 
-def logMRF():
-    # TODO: NEED TO IMPLEMENT
+def sampleK(beta, logMargL, logMargL_prior):
+    """draw k from Nk existing global classes and one new class
+    Args:
+
+    """
+    Nk = len(beta)-1
+    wts = np.zeros((Nk+1,))
+    for k in range(Nk):
+        if beta[k] <= 0:
+            continue
+        # k=kexist
+        wts[k] = log(beta[k]) + logMargL[k]
+    wts[Nk] = log(beta[-1]) + logMargL_prior # k=knew
+    # normalize
+    wts = wts / wts.sum()
+    # draw k
+    knext = np.nonzero(rand.multinomial(1, wts))[0][0]
+    return knext
+
+def sampleBeta(m, hp_gamma):
+    """Sample beta from dirichlet distribution, filling beta_k=0 where m_k==0"""
+    m = np.array(m)
+    alpha = np.append(m[m>0], hp_gamma)
+    res = sampleDir(alpha)
+    active_counter = 0
+    beta = []
+    for k in range(len(m)):
+        if m[k]<=0:
+            beta.append(0)
+        else:
+            beta.append(res[active_counter])
+        active_counter += 1
+    return beta
+
+def logMRF(i, t_j, shape, lbd):
+    """compute Markov Random Field constraint probability using group labels of neighboring data items
+
+    Args:
+        i (int): linear index of data item into doc (image) j
+        t_j (np.ndarray): Ni[j] length vector of group assignments which represents linearized image
+            in row-major order indexed by i
+        shape (2-tuple): original dimensions of document (image) used to eval linear indices of neighboring
+            data items
+        lbd (float): +real weighting factor influencing the strength of the MRF constraint during inference
+        w_j (np.ndarary): Ni[j] sized square matrix of pairwise edge weights in Markov Graph
+    """
     return 0
 
+def numActive(arr):
+    """Gets number of positive elements since 0, negative elements indicate empty cluster/group"""
+    return np.sum(arr > 0)
 
-# INSTANCE OBJECTS
-stirling = unStirling1stProvider()
+def constructfullKMap(tmap, kmap):
+    newarr = tmap.copy()
+    for t, k in enumerate(kmap):
+        newarr[tmap==t] = k
+    return newarr
+
+
