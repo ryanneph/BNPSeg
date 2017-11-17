@@ -8,8 +8,9 @@ from matplotlib import pyplot as plt
 import logging
 
 logger = logging.getLogger(__name__)
+logging.getLogger('PIL').setLevel(logging.WARNING) # suppress PIL logging
 
-def loadImageSet(dname, interactive=False, ftype='float32', normalize=True, resize=None):
+def loadImageSet(dname, visualize=False, ftype='float32', normalize=True, resize=None):
     """load a set of rgb images conatained within a single directory's top level
     Each image is loaded using PIL as an rgb image then linearized into a matrix [shape=(N,D)] containing N
     pixels in row-major (zyx) order, and D-dimensional pixel appearance features
@@ -37,23 +38,28 @@ def loadImageSet(dname, interactive=False, ftype='float32', normalize=True, resi
             if common_dim is None:
                 common_dim = dim
             elif dim != common_dim:
-                raise RuntimeError(("Dimensionality of image: \"{fname}\" (\"{im.mode}\":{dim})" +
-                                   "doesn't match dataset dimensionality ({common_dim})").format(
-                                       fname, im.mode, dim, common_dim
-                                   ))
+                if common_dim == 1:
+                    # convert to grayscale
+                    logger.warning('image: {} has been converted from "{}" to "{}"'.format(fname, im.mode, "L"))
+                    im = im.convert('L')
+                else:
+                    raise RuntimeError(("Dimensionality of image: \"{}\" (\"{}\":{})" +
+                                       "doesn't match dataset dimensionality ({})").format(
+                                           fname, im.mode, dim, common_dim
+                                       ))
 
             # resize image
             if isinstance(resize, numbers.Number) and resize>0:
                 im = im.resize( [int(resize*s) for s in im.size] )
 
-            arr = np.rollaxis(np.array(im), 2).reshape((dim, -1)).T.astype(ftype)
+            arr = np.rollaxis(np.array(im), common_dim-1).reshape((common_dim, -1)).T.astype(ftype)
             if normalize:
                 # normalize to [0,1]
-                for i in range(dim):
+                for i in range(common_dim):
                     arr[:,i] = arr[:,i] / maxint
 
-            if interactive:
-                plotRGB(np.moveaxis(arr.T.reshape((dim, *im.size[::-1])), 0, 2))
+            if visualize:
+                plotRGB(np.moveaxis(arr.T.reshape((common_dim, *im.size[::-1])), 0, 2))
                 plt.show()
             ims.append(arr)
             sizes.append(im.size[::-1])

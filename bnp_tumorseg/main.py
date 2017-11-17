@@ -7,11 +7,17 @@ import pickle
 import numpy as np
 import numpy.random as rand
 import matplotlib.pyplot as plt
+if not 'DISPLAY' in os.environ:
+    # no display server
+    plt.switch_backend('agg')
+
 from variable import Variable
 import fileio
 import loggers
 import helpers
 from notifications import pushNotification
+
+NOTIFY = False
 
 data_root = './test_files/'
 figs_dir  = './figures/'
@@ -21,9 +27,11 @@ blobs_dir = './blobs/'
 # setup logger
 logger = loggers.RotatingFile('./logs/main.log', level=loggers.INFO)
 
-def main():
+def run_sampler():
+    global NOTIFY
     # arg defaults
     default_maxiter = 30
+    default_burnin = 10
     default_ftype = 'float32'
     default_dataset = 'balloons_sub'
     default_visualize = True
@@ -31,9 +39,11 @@ def main():
 
     parser = argparse.ArgumentParser(description='Gibbs sampler for jointly segmenting vector-valued image collections',
             formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument('--verbose', '-v', action='count', default=default_verbose, help='increase verbosity by 1 for each flag')
+    parser.add_argument('--verbose', '-v', action='count', default=default_verbose, help='increase verbosity level by 1 for each flag')
     parser.add_argument('--visualize', action='store_true', default=default_visualize, help='produce intermediate/final result figures')
-    parser.add_argument('--maxiter', type=int, default=default_maxiter)
+    parser.add_argument('--notify', action='store_true', default=NOTIFY, help='send push notifications')
+    parser.add_argument('--maxiter', type=int, default=default_maxiter, help='maximum sampling iterations')
+    parser.add_argument('--burnin', type=int, default=default_burnin, help='number of initial samples to discard in prediction')
     parser.add_argument('--dataset', type=str, choices=[x for x in os.listdir(data_root) if os.path.isdir(os.path.join(data_root, x))],
                         default=default_dataset, help='named testing dataset in {}'.format(data_root))
     parser.add_argument('--ftype', type=str, choices=['float32', 'float64'], default=default_ftype, help='set floating point bit-depth')
@@ -42,8 +52,10 @@ def main():
     ftype = args.ftype
     datapath = os.path.join(data_root, args.dataset)
     visualize = args.visualize
+    NOTIFY = args.notify
     verbose = args.verbose
     maxiter = args.maxiter
+    burnin = args.burnin
 
     # reset logging level
     if verbose == 1:
@@ -66,9 +78,14 @@ def main():
     # semi-permanent settings
     rand.seed(21)
 
+
+    #==================#
+    # Model Definition #
+    #==================#
+
     # load data - load each image as a separate group (j)
     logger.info('loading images from {}.....'.format(datapath))
-    docs, sizes, dim = fileio.loadImageSet(datapath, ftype=ftype, resize=0.50)
+    docs, sizes, dim = fileio.loadImageSet(datapath, ftype=ftype, resize=0.2)
     Nj = len(docs)                       # number of images
     Ni = [doc.shape[0] for doc in docs]  # list of image sizes (linear)
     totaldataitems = np.sum(Ni)
@@ -82,7 +99,7 @@ def main():
     hp_a0     = 0.1                  # document-wise DP concentration param
     hp_n      = dim                  # must be > d-1
     hp_k      = 1                    #
-    hp_mu     = np.zeros((dim,))     # d-rank vector
+    hp_mu     = 0.5*np.ones((dim,))     # d-rank vector
     hp_lbdinv = hp_n * 2*np.eye(dim) # dxd-rank matrix - explicit inverse of lambda precision matrix
                                      # MRF params
     mrf_lbd = 1
@@ -108,26 +125,32 @@ def main():
                                       # we can obtain m_dotdot (global number of groups) by summing elements in m
 
     # initialize latent parameters - traces will be saved
-    #  z_coll = [Variable()]*Nj                 # nested collection of cluster assignment (int) traces for each item in each doc
+    #  z_coll = [Variable() for i in range(Nj)] # nested collection of cluster assignment (int) traces for each item in each doc
     #                                           #     each is a numpy int array indicating full document cluster assignments
     #                                           #     index as: z_coll[j][i] - produces array of class assignment
     #  m_coll = [Variable()]                    # expected number of "groups" - len==Nk at all times, each Variable
     #                                           #     is array with shape=(Nj,)
     #                                           #     index as: m_coll[k][j]
-    t_coll = [Variable() for i in range(Nj)]  # nested collection of group assignment (int) traces for each item in each doc
-                                              #     each item is np.array of integers between 0..(Tj)-1
-                                              #     index as: t_coll[j].value[i]  [size doesnt change]
-    k_coll = [Variable() for i in range(Nj)]  # nested collection of cluster assignment (int) traces for each group in each
-                                              #     doc. Each item is list of integers between 0..K-1
-                                              #     index as: k_coll[j].value[t]  [size of inner list will change with Nt]
-    beta = Variable()                         # wts on cat. distribition over k+1 possible cluster ids from root DP
-                                              #     index as b[k] for k=1...Nk+1 (last element is wt of new cluster)
+
+    # nested collection of group assignment (int) traces for each item in each doc
+    #   each item is np.array of integers between 0..(Tj)-1
+    #   index as: t_coll[j].value[i]  [size doesnt change]
+    t_coll = [Variable(burnin=burnin) for i in range(Nj)]
+
+    # nested collection of cluster assignment (int) traces for each group in each
+    #   doc. Each item is list of integers between 0..K-1
+    #   index as: k_coll[j].value[t]  [size of inner list will change with Nt]
+    k_coll = [Variable(burnin=burnin) for i in range(Nj)]
+
+    # wts on cat. distribition over k+1 possible cluster ids from root DP
+    #   index as b[k] for k=1...Nk+1 (last element is wt of new cluster)
+    beta = Variable(burnin=burnin)
 
     # Properly initialize - all data items in a single group for each doc
     for j in range(Nj):
         t_coll[j].append( np.zeros((Ni[j],), dtype=np.uint32) )
         k_coll[j].append( [0] )
-    beta.append( helpers.sampleDir([1, 1]) )  # begin with uninformative sampling
+    beta.append( helpers.sampleDirDist([1, 1]) )  # begin with uninformative sampling
 
     # convenience closures
     def isClassEmpty(k):
@@ -136,7 +159,10 @@ def main():
         return n[j][t] <= 0
 
 
-    # Sampling
+
+    #==========#
+    # Sampling #
+    #==========#
     for ss_iter in range(maxiter):
         logger.debug('Beginning Sampling Iteration {}'.format(ss_iter+1))
 
@@ -203,6 +229,8 @@ def main():
                     logger.debug3('knext={} of [0..{}] ({} empty)'.format(knext, Nk-1, Nk-np.count_nonzero(m)))
                     if knext >= Nk:
                         m.append(1)
+                        # add to beta
+                        beta.value = helpers.augmentBeta(beta.value, hp_gamma)
                         logger.debug2('new class created: k[{}]; {} active classes (+{} empty)'.format(
                             knext, np.count_nonzero(m), Nk+1-np.count_nonzero(m)))
                         evidence.append(helpers.ModelEvidence(dim=dim, covariance=hp_lbdinv))
@@ -225,27 +253,30 @@ def main():
 
         # display
         if visualize:
-            tcollection = [np.array(t_coll[j].value).reshape(sizes[j]) for j in range(Nj)]
+            tcollection = [np.array(t_coll[j].mode(burn=(ss_iter>burnin))).reshape(sizes[j])
+                           for j in range(Nj)]
             fname = os.path.join(p_figs, 'iter_{}_t'.format(ss_iter+1))
             fileio.savefigure(tcollection, fname)
 
-            kcollection = [helpers.constructfullKMap(tcollection[j], k_coll[j].value) for j in range(Nj)]
+            kcollection = [helpers.constructfullKMap(tcollection[j], k_coll[j].mode(burn=(ss_iter>burnin)))
+                           for j in range(Nj)]
             fname = os.path.join(p_figs, 'iter_{}_k'.format(ss_iter+1))
             fileio.savefigure(kcollection, fname)
 
 
     # report final groups and classes
 
-
     with open(os.path.join(p_blobs, 'data.pickle' ), 'wb') as f:
         pickle.dump([t_coll, k_coll, sizes], f)
 
 
+
 if __name__ == '__main__':
     try:
-        main()
-        pushNotification('Success - {}'.format(__name__), 'finished sampling')
+        run_sampler()
+        if NOTIFY: pushNotification('Success - {}'.format(__name__), 'finished sampling')
+
     except Exception as e:
         msg = 'Exception occured: {!s}'.format(e)
         logger.exception(msg)
-        pushNotification('Exception - {}'.format(__name__), msg)
+        if NOTIFY: pushNotification('Exception - {}'.format(__name__), msg)

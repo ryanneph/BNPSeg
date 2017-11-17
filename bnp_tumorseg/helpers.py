@@ -5,6 +5,9 @@ from numpy.linalg import cholesky, solve
 from scipy import special
 from datetime import datetime
 import choldate
+import logging
+
+logger = logging.getLogger(__name__)
 
 class ModelEvidence:
     """Wrapper for updating cluster evidence through insertion/removal operations of each data item
@@ -142,23 +145,10 @@ def choleskyLogDet(L):
 
     Args:
         L (np.ndarray): Lower triangular matrix [shape=(d,d)]
-
-    Return:
-        float
     """
     return np.sum(np.log(np.diagonal(L)))
 
-def sampleBern(p):
-    """Samples from a bernoulli distribution parameterized by p (and q=1-p)
-
-    Args:
-        p (float): bernoulli parameter limited by 0 <= p <= 1
-
-    Returns: float drawn from bern. dist.
-    """
-    return rand.binomial(1, p)
-
-def sampleDir(alpha):
+def sampleDirDist(alpha):
     """draw random sample from dirichlet distribution parameterized by a vector of +reals
 
     Args:
@@ -272,7 +262,7 @@ def sampleBeta(m, hp_gamma):
     """Sample beta from dirichlet distribution, filling beta_k=0 where m_k==0"""
     m = np.array(m)
     alpha = np.append(m[m>0], hp_gamma)
-    res = sampleDir(alpha)
+    res = sampleDirDist(alpha)
     active_counter = 0
     beta = []
     for k in range(len(m)):
@@ -280,7 +270,15 @@ def sampleBeta(m, hp_gamma):
             beta.append(0)
         else:
             beta.append(res[active_counter])
-        active_counter += 1
+            active_counter += 1
+    beta.append(res[-1])
+    return beta
+
+def augmentBeta(beta, gamma):
+    b = rand.beta(1, gamma)
+    bu = beta[-1]
+    beta[-1] = b*bu
+    beta.append((1-b)*bu)
     return beta
 
 def logMRF(i, t_j, shape, lbd):
@@ -296,10 +294,6 @@ def logMRF(i, t_j, shape, lbd):
         w_j (np.ndarary): Ni[j] sized square matrix of pairwise edge weights in Markov Graph
     """
     return 0
-
-def numActive(arr):
-    """Gets number of positive elements since 0, negative elements indicate empty cluster/group"""
-    return np.sum(arr > 0)
 
 def constructfullKMap(tmap, kmap):
     newarr = tmap.copy()
