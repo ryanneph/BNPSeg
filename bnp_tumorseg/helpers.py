@@ -257,17 +257,13 @@ def sampleT(n_j, k_j, beta, a0, margL, margL_prior, mrf_args):
         margL (list): list of precomputed marginal likelihoods for each cluster k
         margL_prior (float): prior for data item given membership in new cluster knew
     """
-    (i, t_j, shape, lbd) = mrf_args
-
     Nt = len(n_j)
     wts = np.zeros((Nt+1,))
     for t in range(Nt):
         if n_j[t] <= 0:
             continue
-        # t=texist
-        wts[t] = n_j[t] * margL[k_j[t]] * MRF(i, t_j, shape, lbd)
+        wts[t] = n_j[t] * margL[k_j[t]] * MRF(t, *mrf_args) # t=texist
     wts[Nt] = a0 * likelihoodTnew(beta, margL, margL_prior) # t=tnew
-    #  print(wts)
     # draw t
     tnext = sampleCatDist(wts)
     return tnext
@@ -309,21 +305,36 @@ def augmentBeta(beta, gamma):
     beta.append((1-b)*bu)
     return beta
 
-def MRF(i, t_j, shape, lbd):
+def MRF(t, i, t_j, imsize, lbd):
     """compute Markov Random Field constraint probability using group labels of neighboring data items
 
     Args:
         i (int): linear index of data item into doc (image) j
+        t (int): independent var. group index for this probability calculation
         t_j (np.ndarray): Ni[j] length vector of group assignments which represents linearized image
             in row-major order indexed by i
-        shape (2-tuple): original dimensions of document (image) used to eval linear indices of neighboring
+        imsize (2-tuple): original dimensions of document (image) used to eval linear indices of neighboring
             data items
         lbd (float): +real weighting factor influencing the strength of the MRF constraint during inference
         w_j (np.ndarary): Ni[j] sized square matrix of pairwise edge weights in Markov Graph
     """
-    return 1
+    val = 0
+    xi = i % imsize[1]
+    yi = math.floor(i / imsize[1])
+    # accumulate edge costs in clique
+    for xo in [-1, 1]:
+        for yo in [-1, 1]:
+            x = xi + xo
+            y = yi + yo
+            # boundary handling - fill 0s
+            if not (0<=x<imsize[1]) or not (0<=y<imsize[0]):
+                continue
+            val += int(t == t_j[y*imsize[1]+x])
+    val = math.exp(lbd * val)
+    return val
 
 def constructfullKMap(tmap, kmap):
+    """construct a complete k-map from the complete t-map and mapping between t-vals and k-vals"""
     newarr = tmap.copy()
     for t, k in enumerate(kmap):
         newarr[tmap==t] = k

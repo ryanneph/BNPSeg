@@ -47,27 +47,26 @@ def loadImageSet(dname, visualize=False, ftype='float32', normalize=True, resize
                 else:
                     raise RuntimeError(("Dimensionality of image: \"{}\" (\"{}\":{})" +
                                        "doesn't match dataset dimensionality ({})").format(
-                                           fname, im.mode, dim, common_dim
-                                       ))
+                                           fname, im.mode, dim, common_dim))
 
             # resize image
             if isinstance(resize, numbers.Number) and resize>0 and not resize==1:
                 im = im.resize( [int(resize*s) for s in im.size] )
 
-            arr = np.rollaxis(np.array(im), common_dim-1).reshape((common_dim, -1)).T.astype(ftype)
+            # reshape into matrix of shape=(N,dim) with the first axis in row-major order
+            arr = np.array(im).reshape(-1, common_dim).astype(ftype)
             if normalize:
                 # normalize to [0,1]
                 for i in range(common_dim):
                     arr[:,i] = arr[:,i] / maxint
 
             if visualize:
-                tempim = arr.T.reshape(common_dim, *im.size[::-1])
-                tempim = np.moveaxis(tempim, 0, tempim.ndim-1)
+                tempim = arr.reshape(*im.size[::-1], common_dim)
                 plotChannels(tempim)
                 plt.show()
             ims.append(arr)
             sizes.append(im.size[::-1])
-            logger.debug('loaded image: {}, (h,w)={}, shape=({})'.format(fname, im.size, arr.shape))
+            logger.debug('loaded image: {}, (h,w)={}, shape=({})'.format(fname, sizes[-1], arr.shape))
     return ims, sizes, common_dim
 
 def plotChannels(arr):

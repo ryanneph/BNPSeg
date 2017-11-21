@@ -35,8 +35,9 @@ def run_sampler():
     # arg defaults
     default_maxiter = 30
     default_burnin = 40
+    default_smoothlvl = 10
     default_ftype = 'float32'
-    default_dataset = 'balloons_sub'
+    default_dataset = 'blackwhite_sub'
     default_visualize = True
     default_verbose = 2
 
@@ -49,11 +50,13 @@ def run_sampler():
     parser.add_argument('--burnin', type=int, default=default_burnin, help='number of initial samples to discard in prediction')
     parser.add_argument('--dataset', type=str, choices=[x for x in os.listdir(data_root) if os.path.isdir(os.path.join(data_root, x))],
                         default=default_dataset, help='named testing dataset in {}'.format(data_root))
+    parser.add_argument('--smoothlvl', type=np.float, default=default_smoothlvl, help='Set the level of smoothing on class labels')
     parser.add_argument('--ftype', type=str, choices=['float32', 'float64'], default=default_ftype, help='set floating point bit-depth')
     # parse args
     args = parser.parse_args()
     ftype = args.ftype
     datapath = os.path.join(data_root, args.dataset)
+    smoothlvl = max(0, args.smoothlvl)
     visualize = args.visualize
     NOTIFY = args.notify
     verbose = args.verbose
@@ -104,11 +107,11 @@ def run_sampler():
     hp_gamma  = 0.001                # global DP concentration param (higher encourages more global classes to be created)
     hp_a0     = 0.01                 # document-wise DP concentration param (higher encourages more document groups to be created)
     hp_n      = dim*2                # Wishart Deg. of Freedom (must be > d-1)
-    hp_k      = 1                    # mean prior - covariance scaling param
-    hp_mu     = 0.5*np.ones((dim,))  # mean prior - location param (d-rank vector)
+    hp_k      = 0.5                  # mean prior - covariance scaling param
+    hp_mu     = np.ones((dim,))      # mean prior - location param (d-rank vector)
     hp_lbdinv = hp_n * 2*np.eye(dim) # mean prior - covariance matrix (dxd-rank matrix)
     # MRF params
-    mrf_lbd = 1
+    mrf_lbd   = smoothlvl            # strength of spatial group label smoothness
 
     # validate hyperparam settings
     assert hp_n >= dim
@@ -175,6 +178,16 @@ def run_sampler():
 
     def cleanup(fname="final_data.pickle"):
         # report final groups and classes
+        logger.info('Sampling Completed')
+        logger.info('Sampling Summary:\n'
+                    '# active classes:               {:4g} (+{} empty)\n'.format(
+                        np.count_nonzero(m), len(m)+1-np.count_nonzero(m) ) +
+                    '# active groups (avg. per-doc): {:4g} (+{} empty)'.format(
+                        np.average([np.count_nonzero(n[j]) for j in range(Nj)]),
+                        np.average([len(k_coll[j].value)+1-np.count_nonzero(n[j]) for j in range(Nj)]) )
+                    )
+
+        # save data to file
         fname = os.path.join(p_blobs, fname)
         with open(fname, 'wb') as f:
             pickle.dump([t_coll, k_coll, sizes], f)
