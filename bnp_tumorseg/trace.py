@@ -5,7 +5,7 @@ import copy
 import numpy as np
 import scipy.stats
 
-class Variable(MutableSequence):
+class Trace(MutableSequence):
     """state-space variable with sample trace storage and burn-in period rejection support"""
     def __init__(self, init=None, burnin=0, *args, **kwargs):
         MutableSequence.__init__(self, *args, **kwargs)

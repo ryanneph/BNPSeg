@@ -12,7 +12,7 @@ if not 'DISPLAY' in os.environ:
     # no display server
     plt.switch_backend('agg')
 
-from variable import Variable
+from trace import Trace
 import fileio
 import loggers
 import helpers
@@ -134,26 +134,26 @@ def run_sampler():
                                       # we can obtain m_dotdot (global number of groups) by summing elements in m
 
     # initialize latent parameters - traces will be saved
-    #  z_coll = [Variable() for i in range(Nj)] # nested collection of cluster assignment (int) traces for each item in each doc
+    #  z_coll = [Trace() for i in range(Nj)]    # nested collection of cluster assignment (int) traces for each item in each doc
     #                                           #     each is a numpy int array indicating full document cluster assignments
     #                                           #     index as: z_coll[j][i] - produces array of class assignment
-    #  m_coll = [Variable()]                    # expected number of "groups" - len==Nk at all times, each Variable
+    #  m_coll = [Trace()]                       # expected number of "groups" - len==Nk at all times, each Trace
     #                                           #     is array with shape=(Nj,)
     #                                           #     index as: m_coll[k][j]
 
     # nested collection of group assignment (int) traces for each item in each doc
     #   each item is np.array of integers between 0..(Tj)-1
     #   index as: t_coll[j].value[i]  [size doesnt change]
-    t_coll = [Variable(burnin=burnin) for i in range(Nj)]
+    t_coll = [Trace(burnin=burnin) for i in range(Nj)]
 
     # nested collection of cluster assignment (int) traces for each group in each
     #   doc. Each item is list of integers between 0..K-1
     #   index as: k_coll[j].value[t]  [size of inner list will change with Nt]
-    k_coll = [Variable(burnin=burnin) for i in range(Nj)]
+    k_coll = [Trace(burnin=burnin) for i in range(Nj)]
 
     # wts on cat. distribition over k+1 possible cluster ids from root DP
     #   index as b[k] for k=1...Nk+1 (last element is wt of new cluster)
-    beta = Variable(burnin=burnin)
+    beta = Trace(burnin=burnin)
 
     # Properly initialize - all data items in a single group for each doc
     for j in range(Nj):
