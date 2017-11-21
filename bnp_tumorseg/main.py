@@ -3,6 +3,7 @@ import sys
 import signal
 import os.path
 import argparse
+import logging
 import math
 import pickle
 import numpy as np
@@ -26,10 +27,10 @@ logs_dir  = './logs/'
 blobs_dir = './blobs/'
 
 # setup logger
-logger = loggers.RotatingFile('./logs/main.log', level=loggers.INFO)
+logger = logging.getLogger()
 
 def run_sampler():
-    global NOTIFY
+    global NOTIFY, logger
 
     # arg defaults
     default_maxiter = 30
@@ -59,6 +60,15 @@ def run_sampler():
     maxiter = args.maxiter
     burnin = args.burnin
 
+    # make output directories
+    p_figs  = os.path.join(figs_dir, args.dataset)
+    p_blobs = os.path.join(blobs_dir, args.dataset)
+    p_logs  = os.path.join(logs_dir, args.dataset)
+    for dname in [data_root, p_figs, p_logs, p_blobs]:
+        os.makedirs(dname, exist_ok=True)
+
+    # setup logger
+    logger = loggers.RotatingFile(os.path.join(p_logs, 'main.log'), level=loggers.INFO)
     # reset logging level
     if verbose == 1:
         logger.setLevel(loggers.DEBUG)
@@ -66,12 +76,6 @@ def run_sampler():
         logger.setLevel(loggers.DEBUG2)
     elif verbose >= 3:
         logger.setLevel(loggers.DEBUG3)
-
-    # make output directories
-    p_figs = os.path.join(figs_dir, args.dataset)
-    p_blobs = os.path.join(blobs_dir, args.dataset)
-    for dname in [data_root, p_figs, logs_dir, p_blobs]:
-        os.makedirs(dname, exist_ok=True)
 
     # standardize usage of float type according to '--ftype' arg
     def float(x):
