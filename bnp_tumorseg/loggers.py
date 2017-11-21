@@ -55,6 +55,13 @@ def RotatingFile(fname, name=None, level=logging.INFO, backupCount=10):
     rfh.setFormatter(formatter)
     logger.addHandler(rfh)
 
+    # standard file handler shouldn't show warning or error
+    def nowarnerror_filter(record):
+        if record.levelno >= logging.WARNING:
+            return False
+        return True
+    rfh.addFilter(nowarnerror_filter)
+
     # error logger
     fname_err = os.path.join(dirname, basename+'_errors.log')
     err_rfh = logging.handlers.RotatingFileHandler(fname_err, mode='w', maxBytes=0, backupCount=backupCount, delay=True)

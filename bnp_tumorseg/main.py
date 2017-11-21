@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import sys
+import signal
 import os.path
 import argparse
 import math
@@ -29,9 +30,10 @@ logger = loggers.RotatingFile('./logs/main.log', level=loggers.INFO)
 
 def run_sampler():
     global NOTIFY
+
     # arg defaults
     default_maxiter = 30
-    default_burnin = 10
+    default_burnin = 40
     default_ftype = 'float32'
     default_dataset = 'balloons_sub'
     default_visualize = True
@@ -78,31 +80,38 @@ def run_sampler():
     # semi-permanent settings
     rand.seed(21)
 
-
     #==================#
     # Model Definition #
     #==================#
-
     # load data - load each image as a separate group (j)
     logger.info('loading images from {}.....'.format(datapath))
-    docs, sizes, dim = fileio.loadImageSet(datapath, ftype=ftype, resize=0.2)
+    docs, sizes, dim = fileio.loadImageSet(datapath, ftype=ftype, resize=0.25)
     Nj = len(docs)                       # number of images
     Ni = [doc.shape[0] for doc in docs]  # list of image sizes (linear)
     totaldataitems = np.sum(Ni)
+    if visualize:
+        imcollection = [np.array(docs[j]).reshape((*sizes[j], dim))
+                       for j in range(Nj)]
+        fname = os.path.join(p_figs, '0_images')
+        fileio.savefigure(imcollection, fname, cmap=None)
     logger.info('found {} images with dim={}'.format(len(docs), dim))
 
-    # initialize caching provider of Stirling Numbers
-    #  stirling.fillCache(1000, 40, verbose>1)
-
     # hyperparameter settings
-    hp_gamma  = 10                   # global DP concentration param
-    hp_a0     = 0.1                  # document-wise DP concentration param
-    hp_n      = dim                  # must be > d-1
-    hp_k      = 1                    #
-    hp_mu     = 0.5*np.ones((dim,))     # d-rank vector
-    hp_lbdinv = hp_n * 2*np.eye(dim) # dxd-rank matrix - explicit inverse of lambda precision matrix
-                                     # MRF params
+    hp_gamma  = 0.001                # global DP concentration param (higher encourages more global classes to be created)
+    hp_a0     = 0.01                 # document-wise DP concentration param (higher encourages more document groups to be created)
+    hp_n      = dim*2                # Wishart Deg. of Freedom (must be > d-1)
+    hp_k      = 1                    # mean prior - covariance scaling param
+    hp_mu     = 0.5*np.ones((dim,))  # mean prior - location param (d-rank vector)
+    hp_lbdinv = hp_n * 2*np.eye(dim) # mean prior - covariance matrix (dxd-rank matrix)
+    # MRF params
     mrf_lbd = 1
+
+    # validate hyperparam settings
+    assert hp_n >= dim
+    assert hp_gamma > 0
+    assert hp_a0 > 0
+    assert hp_k > 0
+    assert hp_lbdinv.ndim == 2 and hp_lbdinv.shape[0] == hp_lbdinv.shape[1] == dim
 
     # bookkeeping vars
     # rather than recompute class avgs/scatter-matrix on each sample, maintain per-class data outer-product
@@ -152,17 +161,33 @@ def run_sampler():
         k_coll[j].append( [0] )
     beta.append( helpers.sampleDirDist([1, 1]) )  # begin with uninformative sampling
 
-    # convenience closures
+    #==========#
+    # Fxn Defs #
+    #==========#
     def isClassEmpty(k):
         return m[k] <= 0
     def isGroupEmpty(j, t):
         return n[j][t] <= 0
 
+    def cleanup(fname="final_data.pickle"):
+        # report final groups and classes
+        fname = os.path.join(p_blobs, fname)
+        with open(fname, 'wb') as f:
+            pickle.dump([t_coll, k_coll, sizes], f)
+            logger.info('data saved to "{}"'.format(fname))
 
+    # register SIGINT handler
+    ss_iter = None # make available to pre-exit handler
+    def exit_early(signal, frame):
+        logger.warning('SIGINT recieved. Cleaning up and exiting early')
+        cleanup(fname='data@iter#{}.pickle'.format(ss_iter))
+        sys.exit(1)
+    signal.signal(signal.SIGINT, exit_early)
 
     #==========#
     # Sampling #
     #==========#
+    ss_iter = 0
     for ss_iter in range(maxiter):
         logger.debug('Beginning Sampling Iteration {}'.format(ss_iter+1))
 
@@ -195,7 +220,7 @@ def run_sampler():
 
                     # handle empty global cluster
                     if isClassEmpty(kprev):
-                        logger.debug2('Cluster {} emptied'.format(kprev))
+                        logger.debug2('Class {} emptied'.format(kprev))
                         #  del m[kprev]
                         #  del evidence[kprev]
 
@@ -211,8 +236,8 @@ def run_sampler():
                 for k in range(Nk):
                     if isClassEmpty(k):
                         continue
-                    margL[k] = helpers.logMarginalLikelihood(data, evidence[k])
-                margL_prior = helpers.logMarginalLikelihood(data, prior)
+                    margL[k] = helpers.marginalLikelihood(data, evidence[k])
+                margL_prior = helpers.marginalLikelihood(data, prior)
                 mrf_args = (i, t_coll[j].value, sizes[j], mrf_lbd)
                 tnext = helpers.sampleT(n[j], k_coll[j].value, beta.value, hp_a0, margL, margL_prior, mrf_args)
                 t_coll[j].value[i] = tnext
@@ -251,7 +276,7 @@ def run_sampler():
         beta.rollover()
         beta.value = helpers.sampleBeta(m, hp_gamma)
 
-        # display
+        # display class maps
         if visualize:
             tcollection = [np.array(t_coll[j].mode(burn=(ss_iter>burnin))).reshape(sizes[j])
                            for j in range(Nj)]
@@ -263,13 +288,7 @@ def run_sampler():
             fname = os.path.join(p_figs, 'iter_{}_k'.format(ss_iter+1))
             fileio.savefigure(kcollection, fname)
 
-
-    # report final groups and classes
-
-    with open(os.path.join(p_blobs, 'data.pickle' ), 'wb') as f:
-        pickle.dump([t_coll, k_coll, sizes], f)
-
-
+    cleanup()
 
 if __name__ == '__main__':
     try:

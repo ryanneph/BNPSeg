@@ -1,4 +1,5 @@
-from math import pi, sqrt, log, exp
+import math
+from math import pi, sqrt, exp
 import numpy as np
 import numpy.random as rand
 from numpy.linalg import cholesky, solve
@@ -8,6 +9,10 @@ import choldate
 import logging
 
 logger = logging.getLogger(__name__)
+
+eps = 1e-12
+def log(x):
+    return math.log(x+eps)
 
 class ModelEvidence:
     """Wrapper for updating cluster evidence through insertion/removal operations of each data item
@@ -32,12 +37,10 @@ class ModelEvidence:
             self._count = 0
         if 'sum' in kwargs:
             self._sum = kwargs['sum']
-            #  print(f'set sum to {self._sum}')
         else:
             self._sum = np.zeros((dim,))
         if 'outprod' in kwargs:
             self._outprod = kwargs['outprod']
-            #  print(f'set outprod to {self._outprod}')
         else:
             self._outprod = np.zeros((dim, dim))
         if 'Lstar' in kwargs:
@@ -120,12 +123,12 @@ class ModelEvidence:
         return self._sum / self._count
 
 
-def gammaln(x):
-    """computes natural log of the gamma function which is more numerically stable than the gamma
+def gamma(x):
+    """wrapper for computes gamma function"""
+    return special.gamma(x)
 
-    Args:
-        x (float): any real value
-    """
+def gammaln(x):
+    """computes natural log of the gamma function which is more numerically stable than the gamma"""
     return special.gammaln(x)
 
 def choleskyQuadForm(L, b):
@@ -139,6 +142,15 @@ def choleskyQuadForm(L, b):
     fsubLinvb = solve(L, b)
     return fsubLinvb.dot(fsubLinvb)
 
+def choleskyDet(L):
+    """Compute  |A| = (product[i=1-->d]{ L_[i,i] })**2 : the square of the product of the diag. elements of L;
+    with L being the lower triangular matrix resulting from the cholesky decomp. of A
+
+    Args:
+        L (np.ndarray): Lower triangular matrix [shape=(d,d)]
+    """
+    return np.product(np.diagonal(L))**2
+
 def choleskyLogDet(L):
     """Compute  ln(|A|) = 2*sum[i=1-->d]{ ln(L_[i,i]) } : twice the log sum of the diag. elements of L, the
     lower triangular matrix resulting from the cholesky decomp. of A
@@ -147,6 +159,22 @@ def choleskyLogDet(L):
         L (np.ndarray): Lower triangular matrix [shape=(d,d)]
     """
     return np.sum(np.log(np.diagonal(L)))
+
+def sampleCatDist(wts):
+    """Draw 0-based index from categorical distribution"""
+    # check for inf/nan/extremes
+    wtsum = np.sum(wts)
+    if wtsum<=0 or wtsum==np.NaN or wtsum==np.Inf:
+        wts = np.ones_like(wts) / len(wts)
+        logger.warning("unstable categorical weights vector with sum(wts)={}.".format(wtsum))
+        logger.warning("Setting uniform weights: {}".format(wts))
+    else:
+        # normalize
+        wts = wts / np.sum(wts)
+        # check for invalid params
+        if not ((0<=wts).all and (wts<=1).all() and math.isclose(np.sum(wts), 1)):
+            raise AssertionError("invalid categorical weights vector: {}".format(str(wts)))
+    return np.nonzero(rand.multinomial(1, wts))[0][0]
 
 def sampleDirDist(alpha):
     """draw random sample from dirichlet distribution parameterized by a vector of +reals
@@ -159,7 +187,7 @@ def sampleDirDist(alpha):
     """
     return rand.dirichlet(alpha).tolist()
 
-def logMarginalLikelihood(x: np.ndarray, evidence: ModelEvidence):
+def marginalLikelihood(x: np.ndarray, evidence: ModelEvidence):
     """Computes marginal likelihood for a data vector given the model evidence of a Gaussian-Wishart
     conjugate prior model using cholesky decmomposition of scaling matrix to increase efficiency.
 
@@ -189,29 +217,35 @@ def logMarginalLikelihood(x: np.ndarray, evidence: ModelEvidence):
     # compute student's T density given updated params
     tdensln = gammaln(0.5*(nu + d)) - gammaln(0.5*nu) - (0.5*d)*(log(nu*pi) - log(c)) \
             - choleskyLogDet(L) \
-            + (0.5*(1-n_m))*log(1+ (1/nu)*(1/c)*choleskyQuadForm(L, x-mu_m))
-    return tdensln
+            + (0.5*(1-n_m))*log(1+ (1/(c*nu))*choleskyQuadForm(L, x-mu_m))
+    tdens = exp(tdensln)
+    if not 0<=tdens<=1:
+        logger.warning('result of marginal likelihood is not a valid probability between 0->1: {:0.3e}'.format(tdens))
+        # TODO: Why is this sometimes producing tdens >1?
+        tdens = 1
+    return tdens
 
-def logLikelihoodTnew(beta, logMargL, logMargL_prior):
+def likelihoodTnew(beta, margL, margL_prior):
     """calculate data likelihood given that data item belongs to new group tnew
     computes: P(x_ji|tvect, t_ji=tnew, kvect)
 
     Args:
         beta (list): Nk+1 length list containing DP sampled "number of groups" assigned to cluster k in all docs
                      where the last element is beta_u: the DP sampled document concentration parameter
-        logMargL (list): list of precomputed marginal likelihoods for each cluster k
-        logMargL_prior (float): prior for data item given membership in new cluster knew
+        margL (list): list of precomputed marginal likelihoods for each cluster k
+        margL_prior (float): prior for data item given membership in new cluster knew
     """
     val = 0
     for k in range(len(beta)-1):
         if beta[k] <= 0:
             continue
-        val += exp(logMargL[k]) * beta[k]
-    val += beta[-1] * exp(logMargL_prior)
-    val = log(val) - log(np.sum(beta))
+        val += margL[k] * beta[k]
+    val += beta[-1] * margL_prior
+    val /= np.sum(beta)
+    assert 0<=val<=1
     return val
 
-def sampleT(n_j, k_j, beta, a0, logMargL, logMargL_prior, mrf_args):
+def sampleT(n_j, k_j, beta, a0, margL, margL_prior, mrf_args):
     """Draw t from a DP over Nt existing groups in the doc and one new group
 
     Args:
@@ -220,8 +254,8 @@ def sampleT(n_j, k_j, beta, a0, logMargL, logMargL_prior, mrf_args):
         beta (list): Nk+1 length list containing DP sampled "number of groups" assigned to cluster k in all docs
                      where the last element is beta_u: the DP sampled document concentration parameter
 
-        logMargL (list): list of precomputed marginal likelihoods for each cluster k
-        logMargL_prior (float): prior for data item given membership in new cluster knew
+        margL (list): list of precomputed marginal likelihoods for each cluster k
+        margL_prior (float): prior for data item given membership in new cluster knew
     """
     (i, t_j, shape, lbd) = mrf_args
 
@@ -231,31 +265,25 @@ def sampleT(n_j, k_j, beta, a0, logMargL, logMargL_prior, mrf_args):
         if n_j[t] <= 0:
             continue
         # t=texist
-        wts[t] = log(n_j[t]) + logMargL[k_j[t]] + logMRF(i, t_j, shape, lbd)
-    wts[Nt] = log(a0) + logLikelihoodTnew(beta, logMargL, logMargL_prior) # t=tnew
-    # normalize
-    wts = wts / wts.sum()
+        wts[t] = n_j[t] * margL[k_j[t]] * MRF(i, t_j, shape, lbd)
+    wts[Nt] = a0 * likelihoodTnew(beta, margL, margL_prior) # t=tnew
+    #  print(wts)
     # draw t
-    tnext = np.nonzero(rand.multinomial(1, wts))[0][0]
+    tnext = sampleCatDist(wts)
     return tnext
 
-def sampleK(beta, logMargL, logMargL_prior):
-    """draw k from Nk existing global classes and one new class
-    Args:
-
-    """
+def sampleK(beta, margL, margL_prior):
+    """draw k from Nk existing global classes and one new class"""
     Nk = len(beta)-1
     wts = np.zeros((Nk+1,))
     for k in range(Nk):
         if beta[k] <= 0:
             continue
         # k=kexist
-        wts[k] = log(beta[k]) + logMargL[k]
-    wts[Nk] = log(beta[-1]) + logMargL_prior # k=knew
-    # normalize
-    wts = wts / wts.sum()
+        wts[k] = beta[k] * margL[k]
+    wts[Nk] = beta[-1] * margL_prior # k=knew
     # draw k
-    knext = np.nonzero(rand.multinomial(1, wts))[0][0]
+    knext = sampleCatDist(wts)
     return knext
 
 def sampleBeta(m, hp_gamma):
@@ -281,7 +309,7 @@ def augmentBeta(beta, gamma):
     beta.append((1-b)*bu)
     return beta
 
-def logMRF(i, t_j, shape, lbd):
+def MRF(i, t_j, shape, lbd):
     """compute Markov Random Field constraint probability using group labels of neighboring data items
 
     Args:
@@ -293,7 +321,7 @@ def logMRF(i, t_j, shape, lbd):
         lbd (float): +real weighting factor influencing the strength of the MRF constraint during inference
         w_j (np.ndarary): Ni[j] sized square matrix of pairwise edge weights in Markov Graph
     """
-    return 0
+    return 1
 
 def constructfullKMap(tmap, kmap):
     newarr = tmap.copy()

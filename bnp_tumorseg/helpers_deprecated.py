@@ -149,6 +149,120 @@ def sampleStudentT(loc, scale, df):
     """
     return loc + scale.dot( rand.standard_t(df) )
 
+# LOG PROBABILITIES/FUNCTIONS
+def logLikelihoodTnew(beta, logMargL, logMargL_prior):
+    """calculate data likelihood given that data item belongs to new group tnew
+    computes: P(x_ji|tvect, t_ji=tnew, kvect)
+
+    Args:
+        beta (list): Nk+1 length list containing DP sampled "number of groups" assigned to cluster k in all docs
+                     where the last element is beta_u: the DP sampled document concentration parameter
+        logMargL (list): list of precomputed marginal likelihoods for each cluster k
+        logMargL_prior (float): prior for data item given membership in new cluster knew
+    """
+    # TODO: CHECK THIS - MIGHT BE PROBLEMATIC
+    val = 0
+    for k in range(len(beta)-1):
+        if beta[k] <= 0:
+            continue
+        val += exp(logMargL[k]) * beta[k]
+    val += beta[-1] * exp(logMargL_prior)
+    val = log(val) - log(np.sum(beta))
+    return val
+
+def logMarginalLikelihood(x: np.ndarray, evidence: ModelEvidence):
+    """Computes marginal likelihood for a data vector given the model evidence of a Gaussian-Wishart
+    conjugate prior model using cholesky decmomposition of scaling matrix to increase efficiency.
+
+    All input arguments are assumed to be exclusive to cluster k already, thus the result is the marginal
+    likelihood that data x is in cluster k. repeated execution with varying args is necessary to produce the
+    full marg. likelihood over all clusters
+
+    Args:
+        x (np.ndarray): data vector [shape=(d,)]
+        evidence (ModelEvidence): class containing updated bayesian params and running storage of various inputs
+
+    Returns:
+        float describing marginal likelihood that data x belongs to cluster k given model evidence avg
+    """
+    # intermediate steps - bayesian param update is already stored in evidence
+    #    note here that m denotes number of evidence data items in each cluster k - not including x
+    d    = evidence.dim
+    n_m  = evidence.n_m
+    k_m  = evidence.k_m
+    mu_m = evidence.mu_m
+    L    = evidence.cholcov_m
+
+    # intermediate steps - T-dist inputs
+    nu = n_m - d + 1
+    c = (k_m+1)/(k_m*nu)
+
+    # compute student's T density given updated params
+    tdensln = gammaln(0.5*(nu + d)) - gammaln(0.5*nu) - (0.5*d)*(log(nu*pi) - log(c)) \
+            - choleskyLogDet(L) \
+            + (0.5*(1-n_m))*log(1+ (1/(c*nu))*choleskyQuadForm(L, x-mu_m))
+    return tdensln
+
+
+def sampleT(n_j, k_j, beta, a0, logMargL, logMargL_prior, mrf_args):
+    """Draw t from a DP over Nt existing groups in the doc and one new group
+
+    Args:
+        n_j (list):  Nt length list containing number of data items in group t in doc j
+        k_j (list):  Nt length list containing index of class assigned to group t in doc j
+        beta (list): Nk+1 length list containing DP sampled "number of groups" assigned to cluster k in all docs
+                     where the last element is beta_u: the DP sampled document concentration parameter
+
+        logMargL (list): list of precomputed marginal likelihoods for each cluster k
+        logMargL_prior (float): prior for data item given membership in new cluster knew
+    """
+    (i, t_j, shape, lbd) = mrf_args
+
+    Nt = len(n_j)
+    wts = np.zeros((Nt+1,))
+    for t in range(Nt):
+        if n_j[t] <= 0:
+            continue
+        # t=texist
+        wts[t] = log(n_j[t]) + logMargL[k_j[t]] + logMRF(i, t_j, shape, lbd)
+    wts[Nt] = log(a0) + logLikelihoodTnew(beta, logMargL, logMargL_prior) # t=tnew
+    # draw t
+    tnext = sampleCatDist(wts)
+    return tnext
+
+def logMRF(i, t_j, shape, lbd):
+    """compute Markov Random Field constraint probability using group labels of neighboring data items
+
+    Args:
+        i (int): linear index of data item into doc (image) j
+        t_j (np.ndarray): Ni[j] length vector of group assignments which represents linearized image
+            in row-major order indexed by i
+        shape (2-tuple): original dimensions of document (image) used to eval linear indices of neighboring
+            data items
+        lbd (float): +real weighting factor influencing the strength of the MRF constraint during inference
+        w_j (np.ndarary): Ni[j] sized square matrix of pairwise edge weights in Markov Graph
+    """
+    return 0
+
+def sampleK(beta, logMargL, logMargL_prior):
+    """draw k from Nk existing global classes and one new class
+    Args:
+
+    """
+    Nk = len(beta)-1
+    wts = np.zeros((Nk+1,))
+    for k in range(Nk):
+        if beta[k] <= 0:
+            continue
+        # k=kexist
+        wts[k] = log(beta[k]) + logMargL[k]
+    wts[Nk] = log(beta[-1]) + logMargL_prior # k=knew
+    # draw k
+    knext = sampleCatDist(wts)
+    return knext
+
+
+
 
 # INSTANCE OBJECTS
 stirling = unStirling1stProvider()
