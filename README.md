@@ -22,5 +22,10 @@ Running the code for the first time is easy, just follow these steps after you h
 On every iteration, the t-index and k-index _mode_ maps are saved to `./figures/<dataset>/`, and logfiles are saved to `./logs/`. Presently, the full trace histories for t-index, k-index, and beta random variables are stored to file in `./blobs/<dataset>` at the end of the sampling stage.
 
 ## Dependencies
-_coming soon_
+* NumPy
+* SciPy
+* [matplotlib](https://matplotlib.org/)
+* [choldate](https://github.com/jcrudy/choldate)
+
+* [pushbullet.py](https://github.com/randomchars/pushbullet.py) [optional] - for getting success/failure notifications on your mobile devices (see __notifications__ below for more details - coming soon)
 
