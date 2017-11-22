@@ -33,13 +33,14 @@ def run_sampler():
     global NOTIFY, logger
 
     # arg defaults
-    default_maxiter = 30
-    default_burnin = 40
-    default_smoothlvl = 10
-    default_ftype = 'float32'
-    default_dataset = 'blackwhite_sub'
-    default_visualize = True
-    default_verbose = 2
+    default_maxiter        = 30
+    default_burnin         = 40
+    default_smoothlvl      = 10
+    default_resamplefactor = 0.25
+    default_ftype          = 'float32'
+    default_dataset        = 'blackwhite_sub'
+    default_visualize      = True
+    default_verbose        = 2
 
     parser = argparse.ArgumentParser(description='Gibbs sampler for jointly segmenting vector-valued image collections',
             formatter_class=argparse.ArgumentDefaultsHelpFormatter)
@@ -51,12 +52,14 @@ def run_sampler():
     parser.add_argument('--dataset', type=str, choices=[x for x in os.listdir(data_root) if os.path.isdir(os.path.join(data_root, x))],
                         default=default_dataset, help='named testing dataset in {}'.format(data_root))
     parser.add_argument('--smoothlvl', type=np.float, default=default_smoothlvl, help='Set the level of smoothing on class labels')
+    parser.add_argument('--resamplefactor', type=np.float, default=default_resamplefactor, help='Set the resampling factor applied to input images')
     parser.add_argument('--ftype', type=str, choices=['float32', 'float64'], default=default_ftype, help='set floating point bit-depth')
     # parse args
     args = parser.parse_args()
     ftype = args.ftype
     datapath = os.path.join(data_root, args.dataset)
     smoothlvl = max(0, args.smoothlvl)
+    resamplefactor = max(0.01, min(4, args.resamplefactor))
     visualize = args.visualize
     NOTIFY = args.notify
     verbose = args.verbose
@@ -92,7 +95,7 @@ def run_sampler():
     #==================#
     # load data - load each image as a separate group (j)
     logger.info('loading images from {}.....'.format(datapath))
-    docs, sizes, dim = fileio.loadImageSet(datapath, ftype=ftype, resize=0.25)
+    docs, sizes, dim = fileio.loadImageSet(datapath, ftype=ftype, resize=resamplefactor)
     Nj = len(docs)                       # number of images
     Ni = [doc.shape[0] for doc in docs]  # list of image sizes (linear)
     totaldataitems = np.sum(Ni)
@@ -100,7 +103,7 @@ def run_sampler():
         imcollection = [np.array(docs[j]).reshape((*sizes[j], dim))
                        for j in range(Nj)]
         fname = os.path.join(p_figs, '0_images')
-        fileio.savefigure(imcollection, fname, cmap=None)
+        fileio.savefigure(imcollection, fname, cmap=None, header='input images', footer='resample factor: {}'.format(resamplefactor))
     logger.info('found {} images with dim={}'.format(len(docs), dim))
 
     # hyperparameter settings
@@ -298,12 +301,13 @@ def run_sampler():
             tcollection = [np.array(t_coll[j].mode(burn=(ss_iter>burnin))).reshape(sizes[j])
                            for j in range(Nj)]
             fname = os.path.join(p_figs, 'iter_{}_t'.format(ss_iter+1))
-            fileio.savefigure(tcollection, fname)
+            fileio.savefigure(tcollection, fname, header='region labels', footer='iter: {}'.format(ss_iter+1))
 
             kcollection = [helpers.constructfullKMap(tcollection[j], k_coll[j].mode(burn=(ss_iter>burnin)))
                            for j in range(Nj)]
             fname = os.path.join(p_figs, 'iter_{}_k'.format(ss_iter+1))
-            fileio.savefigure(kcollection, fname)
+            fileio.savefigure(kcollection, fname, header='class labels', footer='iter: {:4g}, # active classes: {}'.format(
+                ss_iter+1, np.count_nonzero(m)))
 
     cleanup()
 

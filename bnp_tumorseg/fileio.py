@@ -80,26 +80,36 @@ def plotChannels(arr):
         ax.set_title(titles[i])
     return fig
 
-def savefigure(collection, fname, figsize=(10,10), cmap="Set3"):
+def savefigure(collection, fname, figsize=(10,10), cmap="Set3", header=None, footer=None):
     if cmap is None and collection[0].shape[-1] == 1:
         cmap="Greys"
 
     # plotting parameters
     spacing = 0.01
     margin  = 0.025
+    headerheight = 0.04 * int(bool(header))
+    footerheight = 0.04 * int(bool(footer))
+
+    # add header/footer text
+    fig = plt.figure(figsize=figsize)
+    if header is not None:
+        fig.text(0.5, 1-(margin+0.5*headerheight), str(header),
+                 horizontalalignment='center', verticalalignment='bottom', transform=fig.transFigure)
+    if footer is not None:
+        fig.text(0.5, (margin+0.5*footerheight), str(footer),
+                 horizontalalignment='center', verticalalignment='top', transform=fig.transFigure)
 
     # construct mosaic
-    fig = plt.figure(figsize=figsize)
     Nj = len(collection)
     nrow = math.ceil(math.sqrt(Nj))
     ncol = nrow - (1 if nrow*(nrow-1)>=Nj else 0)
     wper = (1-2*margin-(ncol-1)*spacing)/ncol
-    hper = (1-2*margin-(nrow-1)*spacing)/nrow
+    hper = (1-2*margin-headerheight-footerheight-(nrow-1)*spacing)/nrow
     for j in range(Nj):
         yy = math.floor(j/ncol)
         xx = j % ncol
         ax = fig.add_axes([xx*wper+xx*spacing+margin,
-                           1-(yy*hper+yy*spacing+margin)-hper,
+                           1-(yy*hper+yy*spacing+margin+headerheight)-hper,
                            wper, hper])
         ax.imshow(np.squeeze(collection[j]), cmap=cmap, interpolation=None)
         #  ax.set_axis_off()
