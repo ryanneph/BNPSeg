@@ -31,7 +31,7 @@ class Trace(MutableSequence):
     def insert(self, i, v):
         self._trace.insert(i, v)
 
-    def rollover(self):
+    def beginNewSample(self):
         """Create new entry in the trace history which is identical to the previous trace"""
         prev = self._trace[-1]
         if isinstance(prev, np.ndarray):

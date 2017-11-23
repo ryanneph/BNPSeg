@@ -19,8 +19,9 @@ import loggers
 import helpers
 from notifications import pushNotification
 
-NOTIFY = False
+NOTIFY = False  # send push notifications on success/exception?
 
+# setup directory structure
 data_root = './test_files/'
 figs_dir  = './figures/'
 logs_dir  = './logs/'
@@ -93,7 +94,7 @@ def run_sampler():
     #==================#
     # Model Definition #
     #==================#
-    # load data - load each image as a separate group (j)
+    # load data - load each image as a separate document (j)
     logger.info('loading images from {}.....'.format(datapath))
     docs, sizes, dim = fileio.loadImageSet(datapath, ftype=ftype, resize=resamplefactor)
     Nj = len(docs)                       # number of images
@@ -107,10 +108,10 @@ def run_sampler():
     logger.info('found {} images with dim={}'.format(len(docs), dim))
 
     # hyperparameter settings
-    hp_gamma  = 0.001                # global DP concentration param (higher encourages more global classes to be created)
-    hp_a0     = 0.01                 # document-wise DP concentration param (higher encourages more document groups to be created)
+    hp_gamma  = 1e-8                # global DP concentration param (higher encourages more global classes to be created)
+    hp_a0     = 1e-6                 # document-wise DP concentration param (higher encourages more document groups to be created)
     hp_n      = dim*2                # Wishart Deg. of Freedom (must be > d-1)
-    hp_k      = 0.5                  # mean prior - covariance scaling param
+    hp_k      = 2                 # mean prior - covariance scaling param
     hp_mu     = np.ones((dim,))      # mean prior - location param (d-rank vector)
     hp_lbdinv = hp_n * 2*np.eye(dim) # mean prior - covariance matrix (dxd-rank matrix)
     # MRF params
@@ -165,11 +166,16 @@ def run_sampler():
     #   index as b[k] for k=1...Nk+1 (last element is wt of new cluster)
     beta = Trace(burnin=burnin)
 
-    # Properly initialize - all data items in a single group for each doc
+    # Properly initialize - all data items in a single group for each doc assigned to a single global class
     for j in range(Nj):
         t_coll[j].append( np.zeros((Ni[j],), dtype=np.uint32) )
         k_coll[j].append( [0] )
     beta.append( helpers.sampleDirDist([1, 1]) )  # begin with uninformative sampling
+
+    # history tracking variables
+    ss_iter = None # make available to function closures
+    hist_numclasses        = []
+    hist_numclasses_active = []
 
     #==========#
     # Fxn Defs #
@@ -178,17 +184,47 @@ def run_sampler():
         return m[k] <= 0
     def isGroupEmpty(j, t):
         return n[j][t] <= 0
+    def numActiveGroups(j):
+        return np.count_nonzero(n[j])
+    def numActiveClasses():
+        return np.count_nonzero(m)
+    def numGroups(j):
+        return len(k_coll[j].value)
+    def numClasses():
+        return len(m)
+
+    def savePlots():
+        """Create iteration histories of useful variables"""
+        axsize = (0.1, 0.1, 0.8, 0.8)
+        figmap = {'numclasses': {'active': hist_numclasses_active, 'total': hist_numclasses}}
+
+        fig = plt.figure()
+        for title, axmap in figmap.items():
+            fname = os.path.join(p_figs, '0_hist_{}.png'.format(title))
+            ax = fig.add_axes(axsize)
+            for label, data in axmap.items():
+                if len(data):
+                    ax.plot(range(1, len(data)+1), data, label=label)
+                    ax.set_xlabel('iteration #')
+            ax.legend()
+            ax.set_title(title)
+            fig.savefig(fname)
+            fig.clear()
+        plt.close(fig)
 
     def cleanup(fname="final_data.pickle"):
-        # report final groups and classes
+        """report final groups and classes"""
         logger.info('Sampling Completed')
         logger.info('Sampling Summary:\n'
                     '# active classes:               {:4g} (+{} empty)\n'.format(
-                        np.count_nonzero(m), len(m)+1-np.count_nonzero(m) ) +
+                        numActiveClasses(), numClasses()+1-numActiveClasses() ) +
                     '# active groups (avg. per-doc): {:4g} (+{} empty)'.format(
-                        np.average([np.count_nonzero(n[j]) for j in range(Nj)]),
-                        np.average([len(k_coll[j].value)+1-np.count_nonzero(n[j]) for j in range(Nj)]) )
+                        np.average([numActiveGroups(j) for j in range(Nj)]),
+                        np.average([numGroups(j)+1-numActiveGroups(j) for j in range(Nj)]) )
                     )
+
+        # save tracked history plots
+        savePlots()
 
         # save data to file
         fname = os.path.join(p_blobs, fname)
@@ -197,7 +233,6 @@ def run_sampler():
             logger.info('data saved to "{}"'.format(fname))
 
     # register SIGINT handler
-    ss_iter = None # make available to pre-exit handler
     def exit_early(signal, frame):
         logger.warning('SIGINT recieved. Cleaning up and exiting early')
         cleanup(fname='data@iter#{}.pickle'.format(ss_iter))
@@ -213,9 +248,9 @@ def run_sampler():
 
         # generate random permutation over document indices and iterate
         for j in rand.permutation(Nj):
-            # create new trace histories
-            t_coll[j].rollover()
-            k_coll[j].rollover()
+            # create new trace histories from previous history
+            t_coll[j].beginNewSample()
+            k_coll[j].beginNewSample()
 
             # gen. rand. permutation over elements in document
             for i in rand.permutation(Ni[j]):
@@ -250,8 +285,8 @@ def run_sampler():
 
                 # SAMPLING
                 # sample tnext
-                Nt = len(k_coll[j].value)
-                Nk = len(m)
+                Nt = numGroups(j)
+                Nk = numClasses()
                 margL = np.zeros((Nk,))
                 for k in range(Nk):
                     if isClassEmpty(k):
@@ -261,23 +296,23 @@ def run_sampler():
                 mrf_args = (i, t_coll[j].value, sizes[j], mrf_lbd)
                 tnext = helpers.sampleT(n[j], k_coll[j].value, beta.value, hp_a0, margL, margL_prior, mrf_args)
                 t_coll[j].value[i] = tnext
-                logger.debug3('tnext={} of [0..{}] ({} empty)'.format( tnext, Nt-1, Nt-np.count_nonzero(n[j]) ))
+                logger.debug3('tnext={} of [0..{}] ({} empty)'.format( tnext, Nt-1, Nt-numActiveGroups(j) ))
 
                 # conditionally sample knext if tnext=tnew
                 logger.debug3('tnext={}, Nt={}'.format(tnext, Nt))
                 if tnext >= Nt:
                     n[j].append(1)
                     logger.debug2('new group created: t[{}][{}]; {} active groups in doc {} (+{} empty)'.format(
-                        j, tnext, np.count_nonzero(n[j]), j, Nt+1-np.count_nonzero(n[j]) ))
+                        j, tnext, numActiveGroups(j), j, Nt+1-numActiveGroups(j) ))
                     knext = helpers.sampleK(beta.value, margL, margL_prior)
                     k_coll[j].value.append(knext)
-                    logger.debug3('knext={} of [0..{}] ({} empty)'.format(knext, Nk-1, Nk-np.count_nonzero(m)))
+                    logger.debug3('knext={} of [0..{}] ({} empty)'.format(knext, Nk-1, Nk-numActiveClasses()))
                     if knext >= Nk:
                         m.append(1)
                         # add to beta
                         beta.value = helpers.augmentBeta(beta.value, hp_gamma)
                         logger.debug2('new class created: k[{}]; {} active classes (+{} empty)'.format(
-                            knext, np.count_nonzero(m), Nk+1-np.count_nonzero(m)))
+                            knext, numActiveClasses(), Nk+1-numActiveClasses()))
                         evidence.append(helpers.ModelEvidence(dim=dim, covariance=hp_lbdinv))
                     else:
                         m[knext] += 1
@@ -293,21 +328,25 @@ def run_sampler():
                 logger.debug3('')
 
         # sample beta
-        beta.rollover()
+        beta.beginNewSample()
         beta.value = helpers.sampleBeta(m, hp_gamma)
+
+        # save tracked history variables
+        hist_numclasses_active.append(numActiveClasses())
+        hist_numclasses.append(numClasses())
 
         # display class maps
         if visualize:
             tcollection = [np.array(t_coll[j].mode(burn=(ss_iter>burnin))).reshape(sizes[j])
                            for j in range(Nj)]
-            fname = os.path.join(p_figs, 'iter_{}_t'.format(ss_iter+1))
+            fname = os.path.join(p_figs, 'iter_{:04}_t'.format(ss_iter+1))
             fileio.savefigure(tcollection, fname, header='region labels', footer='iter: {}'.format(ss_iter+1))
 
             kcollection = [helpers.constructfullKMap(tcollection[j], k_coll[j].mode(burn=(ss_iter>burnin)))
                            for j in range(Nj)]
-            fname = os.path.join(p_figs, 'iter_{}_k'.format(ss_iter+1))
+            fname = os.path.join(p_figs, 'iter_{:04}_k'.format(ss_iter+1))
             fileio.savefigure(kcollection, fname, header='class labels', footer='iter: {:4g}, # active classes: {}'.format(
-                ss_iter+1, np.count_nonzero(m)))
+                ss_iter+1, numActiveClasses()))
 
     cleanup()
 
