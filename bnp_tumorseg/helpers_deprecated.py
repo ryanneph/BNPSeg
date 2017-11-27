@@ -200,7 +200,7 @@ def logMarginalLikelihood(x: np.ndarray, evidence: ModelEvidence):
     # compute student's T density given updated params
     tdensln = gammaln(0.5*(nu + d)) - gammaln(0.5*nu) - (0.5*d)*(log(nu*pi) - log(c)) \
             - choleskyLogDet(L) \
-            + (0.5*(1-n_m))*log(1+ (1/(c*nu))*choleskyQuadForm(L, x-mu_m))
+            - (0.5*(nu+d))*log(1+ (1/(c*nu))*choleskyQuadForm(L, x-mu_m))
     return tdensln
 
 

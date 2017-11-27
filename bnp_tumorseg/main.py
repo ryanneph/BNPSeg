@@ -293,7 +293,7 @@ def run_sampler():
                         continue
                     margL[k] = helpers.marginalLikelihood(data, evidence[k])
                 margL_prior = helpers.marginalLikelihood(data, prior)
-                mrf_args = (i, t_coll[j].value, sizes[j], mrf_lbd)
+                mrf_args = (i, t_coll[j].value, sizes[j], mrf_lbd, k_coll[j].value)
                 tnext = helpers.sampleT(n[j], k_coll[j].value, beta.value, hp_a0, margL, margL_prior, mrf_args)
                 t_coll[j].value[i] = tnext
                 logger.debug3('tnext={} of [0..{}] ({} empty)'.format( tnext, Nt-1, Nt-numActiveGroups(j) ))
@@ -348,6 +348,7 @@ def run_sampler():
             fileio.savefigure(kcollection, fname, header='class labels', footer='iter: {:4g}, # active classes: {}'.format(
                 ss_iter+1, numActiveClasses()))
 
+    # log summary, generate plots, save checkpoint data
     cleanup()
 
 if __name__ == '__main__':

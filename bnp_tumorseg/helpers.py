@@ -158,15 +158,16 @@ def choleskyLogDet(L):
     Args:
         L (np.ndarray): Lower triangular matrix [shape=(d,d)]
     """
-    return np.sum(np.log(np.diagonal(L)))
+    return 2*np.sum(np.log(np.diagonal(L)))
 
 def sampleCatDist(wts):
     """Draw 0-based index from categorical distribution"""
     # check for inf/nan/extremes
     wtsum = np.sum(wts)
     if wtsum<=0 or wtsum==np.NaN or wtsum==np.Inf:
-        wts = np.ones_like(wts) / len(wts)
+        # usually occurs becuase margL is 0 for all classes
         logger.warning("unstable categorical weights vector with sum(wts)={}.".format(wtsum))
+        wts = np.ones_like(wts) / len(wts)
         logger.warning("Setting uniform weights: {}".format(wts))
     else:
         # normalize
@@ -215,10 +216,15 @@ def marginalLikelihood(x: np.ndarray, evidence: ModelEvidence):
     c = (k_m+1)/(k_m*nu)
 
     # compute student's T density given updated params
-    tdensln = gammaln(0.5*(nu + d)) - gammaln(0.5*nu) - (0.5*d)*(log(nu*pi) - log(c)) \
-            - choleskyLogDet(L) \
-            + (0.5*(1-n_m))*log(1+ (1/(c*nu))*choleskyQuadForm(L, x-mu_m))
+    tdensln = gammaln(0.5*(n_m+1)) - gammaln(0.5*nu) - (0.5*d)*(log(nu*pi) - log(c)) \
+            - 0.5*choleskyLogDet(L) \
+            - (0.5*(nu+d))*log(1+ (1/(c*nu))*choleskyQuadForm(L, x-mu_m))
     tdens = exp(tdensln)
+    if tdens == 0 and False:
+        print("tdensln", tdensln)
+        print("1",gammaln(0.5*(n_m+1)) - gammaln(0.5*nu) - (0.5*d)*(log(nu*pi) - log(c)))
+        print("2",choleskyLogDet(L))
+        print("3",(-0.5*(nu+d))*log(1+ (1/(c*nu))*choleskyQuadForm(L, x-mu_m)))
     if not 0<=tdens<=1:
         logger.warning('result of marginal likelihood is not a valid probability between 0->1: {:0.3e}'.format(tdens))
         # TODO: Why is this sometimes producing tdens >1?
@@ -245,7 +251,7 @@ def likelihoodTnew(beta, margL, margL_prior):
     assert 0<=val<=1
     return val
 
-def sampleT(n_j, k_j, beta, a0, margL, margL_prior, mrf_args):
+def sampleT(n_j, k_j, beta, a0, margL, margL_prior, mrf_args=None):
     """Draw t from a DP over Nt existing groups in the doc and one new group
 
     Args:
@@ -262,14 +268,17 @@ def sampleT(n_j, k_j, beta, a0, margL, margL_prior, mrf_args):
     for t in range(Nt):
         if n_j[t] <= 0:
             continue
-        wts[t] = n_j[t] * margL[k_j[t]] * MRF(t, *mrf_args) # t=texist
+        wts[t] = n_j[t] * margL[k_j[t]] # t=texist
+        if mrf_args is not None:
+            wts[t] *= MRF(t, *mrf_args)
     wts[Nt] = a0 * likelihoodTnew(beta, margL, margL_prior) # t=tnew
     # draw t
     tnext = sampleCatDist(wts)
     return tnext
 
-def sampleK(beta, margL, margL_prior):
-    """draw k from Nk existing global classes and one new class"""
+def sampleK(beta, margL, margL_prior, mrf_args=None):
+    """draw k from Nk existing global classes and one new class
+    specify mrf_args if MRF constraint should be used directly on k-map"""
     Nk = len(beta)-1
     wts = np.zeros((Nk+1,))
     for k in range(Nk):
@@ -277,6 +286,8 @@ def sampleK(beta, margL, margL_prior):
             continue
         # k=kexist
         wts[k] = beta[k] * margL[k]
+        if mrf_args is not None:
+            wts[k] *= MRF(*mrf_args, k=k)
     wts[Nk] = beta[-1] * margL_prior # k=knew
     # draw k
     knext = sampleCatDist(wts)
@@ -305,7 +316,7 @@ def augmentBeta(beta, gamma):
     beta.append((1-b)*bu)
     return beta
 
-def MRF(t, i, t_j, imsize, lbd):
+def MRF(t, i, t_j, imsize, lbd, k_j=None, k=None):
     """compute Markov Random Field constraint probability using group labels of neighboring data items
 
     Args:
@@ -317,6 +328,10 @@ def MRF(t, i, t_j, imsize, lbd):
             data items
         lbd (float): +real weighting factor influencing the strength of the MRF constraint during inference
         w_j (np.ndarary): Ni[j] sized square matrix of pairwise edge weights in Markov Graph
+    Optional Args:
+        k   (int): indep. variable class index. if None, use k=k_j[t] instead
+        k_j (np.ndarray): vector mapping group label: t[j][i] to class label: k[j][t]. If None, use MRF on
+            t-label instead of k-label
     """
     val = 0
     xi = i % imsize[1]
@@ -329,7 +344,13 @@ def MRF(t, i, t_j, imsize, lbd):
             # boundary handling - fill 0s
             if not (0<=x<imsize[1]) or not (0<=y<imsize[0]):
                 continue
-            val += int(t == t_j[y*imsize[1]+x])
+            t_ji = t_j[y*imsize[1]+x]
+            if k_j is None:
+                val += int(t == t_ji)
+            else:
+                if k is None:
+                    k=k_j[t]
+                val += int(k == k_j[t_ji])
     val = math.exp(lbd * val)
     return val
 
