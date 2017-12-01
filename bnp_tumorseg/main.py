@@ -4,8 +4,10 @@ import signal
 import os.path
 import argparse
 import logging
+import time
 import math
 import pickle
+import random
 import numpy as np
 import numpy.random as rand
 import matplotlib.pyplot as plt
@@ -20,6 +22,7 @@ import helpers
 from notifications import pushNotification
 
 NOTIFY = False  # send push notifications on success/exception?
+CLEANUP = None
 
 # setup directory structure
 data_root = './test_files/'
@@ -31,17 +34,17 @@ blobs_dir = './blobs/'
 logger = logging.getLogger()
 
 def run_sampler():
-    global NOTIFY, logger
+    global NOTIFY, CLEANUP, logger
 
     # arg defaults
     default_maxiter        = 30
     default_burnin         = 40
     default_smoothlvl      = 10
     default_resamplefactor = 0.25
-    default_ftype          = 'float32'
+    default_ftype          = 'float64'
     default_dataset        = 'blackwhite_sub'
     default_visualize      = True
-    default_verbose        = 2
+    default_verbose        = 0
 
     parser = argparse.ArgumentParser(description='Gibbs sampler for jointly segmenting vector-valued image collections',
             formatter_class=argparse.ArgumentDefaultsHelpFormatter)
@@ -77,12 +80,10 @@ def run_sampler():
     # setup logger
     logger = loggers.RotatingFile(os.path.join(p_logs, 'main.log'), level=loggers.INFO)
     # reset logging level
-    if verbose == 1:
-        logger.setLevel(loggers.DEBUG)
-    elif verbose == 2:
-        logger.setLevel(loggers.DEBUG2)
-    elif verbose >= 3:
-        logger.setLevel(loggers.DEBUG3)
+    if verbose <= 0:
+        logger.setLevel(loggers.INFO)
+    else:
+        logger.setLevel(loggers.DEBUG+1-verbose)
 
     # standardize usage of float type according to '--ftype' arg
     def float(x):
@@ -90,6 +91,7 @@ def run_sampler():
 
     # semi-permanent settings
     rand.seed(21)
+    init_nclasses = 2 # randomly init items into # groups per image and # global groups
 
     #==================#
     # Model Definition #
@@ -108,18 +110,17 @@ def run_sampler():
     logger.info('found {} images with dim={}'.format(len(docs), dim))
 
     # hyperparameter settings
-    hp_gamma  = 1e-8                # global DP concentration param (higher encourages more global classes to be created)
-    hp_a0     = 1e-6                 # document-wise DP concentration param (higher encourages more document groups to be created)
+    #  hp_gamma  = 5                # global DP concentration param (higher encourages more global classes to be created)
+    hp_a0     = 5                 # document-wise DP concentration param (higher encourages more document groups to be created)
     hp_n      = dim*2                # Wishart Deg. of Freedom (must be > d-1)
     hp_k      = 2                 # mean prior - covariance scaling param
-    hp_mu     = np.ones((dim,))      # mean prior - location param (d-rank vector)
+    hp_mu     = 0.1*np.ones((dim,))      # mean prior - location param (d-rank vector)
     hp_lbdinv = hp_n * 2*np.eye(dim) # mean prior - covariance matrix (dxd-rank matrix)
     # MRF params
     mrf_lbd   = smoothlvl            # strength of spatial group label smoothness
 
     # validate hyperparam settings
     assert hp_n >= dim
-    assert hp_gamma > 0
     assert hp_a0 > 0
     assert hp_k > 0
     assert hp_lbdinv.ndim == 2 and hp_lbdinv.shape[0] == hp_lbdinv.shape[1] == dim
@@ -128,19 +129,14 @@ def run_sampler():
     # rather than recompute class avgs/scatter-matrix on each sample, maintain per-class data outer-product
     # and sum (for re-evaluating class avg) and simply update for each member insert/remove
     # each of these classes exposes insert(v)/remove(v) methods and value property
+    helpers.ModelEvidence.dim_0 = dim
     helpers.ModelEvidence.n_0 = hp_n
     helpers.ModelEvidence.k_0 = hp_k
     helpers.ModelEvidence.mu_0 = hp_mu
-    prior    = helpers.ModelEvidence(dim=dim, covariance=hp_lbdinv)
-    evidence = [helpers.ModelEvidence(dim=dim,
-                                      count=totaldataitems,
-                                      sum=np.sum( np.sum(doc, axis=0) for doc in docs ),
-                                      outprod=np.sum( np.sum( np.outer(doc[i,:], doc[i,:]) for i in range(doc.shape[0]) ) for doc in docs ),
-                                      covariance=hp_lbdinv)]  # len==Nk at all times
-    n = [[Ni[j]] for j in range(Nj)]  # len==Nj at all times for outerlist, len==Nt[j] at all times for inner list
-                                      #     counts number of data items in doc j assigned to group t
-                                      #     index as: n[j][t]
-    m = [Nj]                          # len==Nk at all times; counts number of groups (t) with cluster assigned to k
+    helpers.ModelEvidence.lbdinv_0 = hp_lbdinv
+    prior    = helpers.ModelEvidence()
+    evidence = [[helpers.ModelEvidence() for i in range(init_nclasses)] for j in range(Nj)] # len==Nk at all times
+    n = [[0 for i in range(init_nclasses)] for j in range(Nj)]   # len==Nk at all times; counts number of groups (t) with cluster assigned to k
                                       #     index as: m[k]
                                       # we can obtain m_dotdot (global number of groups) by summing elements in m
 
@@ -152,25 +148,23 @@ def run_sampler():
     #                                           #     is array with shape=(Nj,)
     #                                           #     index as: m_coll[k][j]
 
-    # nested collection of group assignment (int) traces for each item in each doc
-    #   each item is np.array of integers between 0..(Tj)-1
-    #   index as: t_coll[j].value[i]  [size doesnt change]
-    t_coll = [Trace(burnin=burnin) for i in range(Nj)]
 
     # nested collection of cluster assignment (int) traces for each group in each
     #   doc. Each item is list of integers between 0..K-1
     #   index as: k_coll[j].value[t]  [size of inner list will change with Nt]
     k_coll = [Trace(burnin=burnin) for i in range(Nj)]
 
-    # wts on cat. distribition over k+1 possible cluster ids from root DP
-    #   index as b[k] for k=1...Nk+1 (last element is wt of new cluster)
-    beta = Trace(burnin=burnin)
 
-    # Properly initialize - all data items in a single group for each doc assigned to a single global class
-    for j in range(Nj):
-        t_coll[j].append( np.zeros((Ni[j],), dtype=np.uint32) )
-        k_coll[j].append( [0] )
-    beta.append( helpers.sampleDirDist([1, 1]) )  # begin with uninformative sampling
+    # Properly initialize - random init among p groups per image and p global groups (p==init_nclasses)
+    logger.debug("started adding all data items to initial class")
+    for j, doc in enumerate(docs):
+        k_coll[j].append( [0]*Ni[j] )
+        for i, data in enumerate(doc):
+            r = random.randrange(init_nclasses)
+            evidence[j][r].insert(data)
+            n[j][r] += 1
+            k_coll[j].value[i] = r
+    logger.debug("finished adding all data items to initial class")
 
     # history tracking variables
     ss_iter = None # make available to function closures
@@ -180,18 +174,20 @@ def run_sampler():
     #==========#
     # Fxn Defs #
     #==========#
-    def isClassEmpty(k):
-        return m[k] <= 0
-    def isGroupEmpty(j, t):
-        return n[j][t] <= 0
-    def numActiveGroups(j):
+    def isClassEmpty(j,k):
+        return n[j][k] <= 0
+    def numActiveClasses(j):
         return np.count_nonzero(n[j])
-    def numActiveClasses():
-        return np.count_nonzero(m)
-    def numGroups(j):
-        return len(k_coll[j].value)
-    def numClasses():
-        return len(m)
+    def numClasses(j):
+        return len(n[j])
+    def createNewGroup():
+        pass
+    def createNewClass(j):
+        n[j].append(1)
+        # create a tracked evidence object for the new class
+        evidence[j].append(helpers.ModelEvidence())
+        logger.debug2('new class created: k[{}]; {} active classes (+{} empty)'.format(
+            numActiveClasses(j), numActiveClasses(j), numClasses(j)-numActiveClasses(j)))
 
     def savePlots():
         """Create iteration histories of useful variables"""
@@ -217,10 +213,7 @@ def run_sampler():
         logger.info('Sampling Completed')
         logger.info('Sampling Summary:\n'
                     '# active classes:               {:4g} (+{} empty)\n'.format(
-                        numActiveClasses(), numClasses()+1-numActiveClasses() ) +
-                    '# active groups (avg. per-doc): {:4g} (+{} empty)'.format(
-                        np.average([numActiveGroups(j) for j in range(Nj)]),
-                        np.average([numGroups(j)+1-numActiveGroups(j) for j in range(Nj)]) )
+                        numActiveClasses(j), numClasses(j)+1-numActiveClasses(j) )
                     )
 
         # save tracked history plots
@@ -229,11 +222,15 @@ def run_sampler():
         # save data to file
         fname = os.path.join(p_blobs, fname)
         with open(fname, 'wb') as f:
-            pickle.dump([t_coll, k_coll, sizes], f)
+            pickle.dump([k_coll, sizes], f)
             logger.info('data saved to "{}"'.format(fname))
+    CLEANUP = cleanup
 
-    # register SIGINT handler
-    def exit_early(signal, frame):
+    # register SIGINT handler (ctrl-c)
+    def exit_early(sig, frame):
+        # kill immediately on next press of ctrl-c
+        signal.signal(signal.SIGINT, lambda sig, frame: sys.exit(1))
+
         logger.warning('SIGINT recieved. Cleaning up and exiting early')
         cleanup(fname='data@iter#{}.pickle'.format(ss_iter))
         sys.exit(1)
@@ -247,106 +244,73 @@ def run_sampler():
         logger.debug('Beginning Sampling Iteration {}'.format(ss_iter+1))
 
         # generate random permutation over document indices and iterate
-        for j in rand.permutation(Nj):
+        jpermutation = rand.permutation(Nj)
+        for j in jpermutation:
             # create new trace histories from previous history
-            t_coll[j].beginNewSample()
             k_coll[j].beginNewSample()
 
             # gen. rand. permutation over elements in document
-            for i in rand.permutation(Ni[j]):
+            ipermutation = rand.permutation(Ni[j])
+            for i in ipermutation:
                 logger.debug3('ss_iter={}, j={}, i={}'.format(ss_iter, j, i))
                 data = docs[j][i,:]
 
                 # get previous assignments
-                tprev = t_coll[j].value[i]
-                kprev = k_coll[j].value[tprev]
-                evidence_kprev = evidence[kprev]
+                kprev = k_coll[j].value[i]
 
                 # remove count from group tprev, class kprev
-                n[j][tprev] -= 1
-                logger.debug3('n[{}][{}]-- -> {}'.format(j, tprev, n[j][tprev]))
+                n[j][kprev] -= 1
+                evidence[j][kprev].remove(data)
+                logger.debug3('n[{}][{}]-- -> {}'.format(j, i, n[j][kprev]))
                 # handle empty group in doc j
-                if isGroupEmpty(j, tprev):
-                    logger.debug2('Group {} in doc {} emptied'.format(tprev, j))
-                    n[j][tprev] = 0 # probably not necessary
-                    m[kprev] -= 1
-                    #  del n[j][tprev]       # forget number of data items in empty group
-                    #  del k_coll[j][tprev]  # forget cluster assignment for empty group
-
-                    # handle empty global cluster
-                    if isClassEmpty(kprev):
-                        logger.debug2('Class {} emptied'.format(kprev))
-                        #  del m[kprev]
-                        #  del evidence[kprev]
-
-                # remove data item from evidence for class k only if class k still exists
-                if not isClassEmpty(kprev):
-                    evidence_kprev.remove(data)
+                if isClassEmpty(j, kprev):
+                    logger.debug2('Group {} in doc {} emptied'.format(i, j))
+                    n[j][kprev] = 0 # probably not necessary
 
                 # SAMPLING
                 # sample tnext
-                Nt = numGroups(j)
-                Nk = numClasses()
+                Nk = numClasses(j)
                 margL = np.zeros((Nk,))
-                for k in range(Nk):
-                    if isClassEmpty(k):
-                        continue
-                    margL[k] = helpers.marginalLikelihood(data, evidence[k])
+                for kk in range(Nk):
+                    if isClassEmpty(j,kk): continue
+                    margL[kk] = helpers.marginalLikelihood(data, evidence[j][kk])
                 margL_prior = helpers.marginalLikelihood(data, prior)
-                mrf_args = (i, t_coll[j].value, sizes[j], mrf_lbd, k_coll[j].value)
-                tnext = helpers.sampleT(n[j], k_coll[j].value, beta.value, hp_a0, margL, margL_prior, mrf_args)
-                t_coll[j].value[i] = tnext
-                logger.debug3('tnext={} of [0..{}] ({} empty)'.format( tnext, Nt-1, Nt-numActiveGroups(j) ))
-
-                # conditionally sample knext if tnext=tnew
-                logger.debug3('tnext={}, Nt={}'.format(tnext, Nt))
-                if tnext >= Nt:
-                    n[j].append(1)
+                mrf_args = (i, k_coll[j].value, sizes[j], mrf_lbd, k_coll[j].value)
+                knext = helpers.sampleT(n[j], k_coll[j].value, n, hp_a0, margL, margL_prior)
+                print(j, i, knext, len(n[j]), len(k_coll[j].value))
+                k_coll[j].value[i] = knext
+                if knext >= Nk:
+                    # conditionally sample knext for tnext=tnew
+                    createNewClass(j)
+                    k_coll[j].value[i] = (knext)
                     logger.debug2('new group created: t[{}][{}]; {} active groups in doc {} (+{} empty)'.format(
-                        j, tnext, numActiveGroups(j), j, Nt+1-numActiveGroups(j) ))
-                    knext = helpers.sampleK(beta.value, margL, margL_prior)
-                    k_coll[j].value.append(knext)
-                    logger.debug3('knext={} of [0..{}] ({} empty)'.format(knext, Nk-1, Nk-numActiveClasses()))
-                    if knext >= Nk:
-                        m.append(1)
-                        # add to beta
-                        beta.value = helpers.augmentBeta(beta.value, hp_gamma)
-                        logger.debug2('new class created: k[{}]; {} active classes (+{} empty)'.format(
-                            knext, numActiveClasses(), Nk+1-numActiveClasses()))
-                        evidence.append(helpers.ModelEvidence(dim=dim, covariance=hp_lbdinv))
-                    else:
-                        m[knext] += 1
-                    logger.debug3('m[{}]++ -> {}'.format(knext, m[knext]))
+                        j, knext, numActiveClasses(j), j, Nk+1-numActiveClasses(j) ))
                 else:
-                    n[j][tnext] += 1
-                    logger.debug3('n[{}][{}]++ -> {}'.format(j, tnext, n[j][tnext]))
-                    knext = k_coll[j].value[tnext]
-
-                # insert data into newly assigned cluster evidence
-                evidence[knext].insert(data)
-
+                    n[j][knext] += 1
+                    #  knext = k_coll[j].value[tnext]
+                    logger.debug3('n[{}][{}]++ -> {}'.format(j, i, n[j][knext]))
+                evidence[j][knext].insert(data)
                 logger.debug3('')
-
-        # sample beta
-        beta.beginNewSample()
-        beta.value = helpers.sampleBeta(m, hp_gamma)
+            # END Pixel loop
+        # END Image loop
 
         # save tracked history variables
-        hist_numclasses_active.append(numActiveClasses())
-        hist_numclasses.append(numClasses())
+        hist_numclasses_active.append(numActiveClasses(j))
+        hist_numclasses.append(numClasses(j))
 
         # display class maps
         if visualize:
-            tcollection = [np.array(t_coll[j].mode(burn=(ss_iter>burnin))).reshape(sizes[j])
+            kcollection = [np.array(k_coll[j].mode(burn=(ss_iter>burnin))).reshape(sizes[j])
                            for j in range(Nj)]
             fname = os.path.join(p_figs, 'iter_{:04}_t'.format(ss_iter+1))
-            fileio.savefigure(tcollection, fname, header='region labels', footer='iter: {}'.format(ss_iter+1))
+            fileio.savefigure(kcollection, fname, header='region labels', footer='iter: {}'.format(ss_iter+1))
 
-            kcollection = [helpers.constructfullKMap(tcollection[j], k_coll[j].mode(burn=(ss_iter>burnin)))
-                           for j in range(Nj)]
-            fname = os.path.join(p_figs, 'iter_{:04}_k'.format(ss_iter+1))
-            fileio.savefigure(kcollection, fname, header='class labels', footer='iter: {:4g}, # active classes: {}'.format(
-                ss_iter+1, numActiveClasses()))
+            # DEBUG
+            if verbose >= 3:
+                kcollection = [np.array(k_coll[j].value).reshape(sizes[j])
+                               for j in range(Nj)]
+                fname = os.path.join(p_figs, 'iter_{:04}_t_value'.format(ss_iter+1))
+                fileio.savefigure(kcollection, fname, header='region labels', footer='iter: {}'.format(ss_iter+1))
 
     # log summary, generate plots, save checkpoint data
     cleanup()
@@ -360,3 +324,4 @@ if __name__ == '__main__':
         msg = 'Exception occured: {!s}'.format(e)
         logger.exception(msg)
         if NOTIFY: pushNotification('Exception - {}'.format(__name__), msg)
+        if callable(CLEANUP): CLEANUP()
