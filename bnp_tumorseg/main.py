@@ -4,8 +4,10 @@ import signal
 import os.path
 import argparse
 import logging
+import time
 import math
 import pickle
+import random
 import numpy as np
 import numpy.random as rand
 import matplotlib.pyplot as plt
@@ -20,6 +22,7 @@ import helpers
 from notifications import pushNotification
 
 NOTIFY = False  # send push notifications on success/exception?
+CLEANUP = None
 
 # setup directory structure
 data_root = './test_files/'
@@ -31,17 +34,17 @@ blobs_dir = './blobs/'
 logger = logging.getLogger()
 
 def run_sampler():
-    global NOTIFY, logger
+    global NOTIFY, CLEANUP, logger
 
     # arg defaults
     default_maxiter        = 30
     default_burnin         = 40
     default_smoothlvl      = 10
     default_resamplefactor = 0.25
-    default_ftype          = 'float32'
+    default_ftype          = 'float64'
     default_dataset        = 'blackwhite_sub'
     default_visualize      = True
-    default_verbose        = 2
+    default_verbose        = 0
 
     parser = argparse.ArgumentParser(description='Gibbs sampler for jointly segmenting vector-valued image collections',
             formatter_class=argparse.ArgumentDefaultsHelpFormatter)
@@ -77,19 +80,19 @@ def run_sampler():
     # setup logger
     logger = loggers.RotatingFile(os.path.join(p_logs, 'main.log'), level=loggers.INFO)
     # reset logging level
-    if verbose == 1:
-        logger.setLevel(loggers.DEBUG)
-    elif verbose == 2:
-        logger.setLevel(loggers.DEBUG2)
-    elif verbose >= 3:
-        logger.setLevel(loggers.DEBUG3)
+    if verbose <= 0:
+        logger.setLevel(loggers.INFO)
+    else:
+        logger.setLevel(loggers.DEBUG+1-verbose)
 
     # standardize usage of float type according to '--ftype' arg
     def float(x):
         return np.dtype(ftype).type(x)
 
     # semi-permanent settings
-    rand.seed(21)
+    rand.seed(21) #numpy
+    random.seed(21) #python
+    init_nclasses = 3 # randomly init items into # groups per image and # global groups
 
     #==================#
     # Model Definition #
@@ -108,8 +111,8 @@ def run_sampler():
     logger.info('found {} images with dim={}'.format(len(docs), dim))
 
     # hyperparameter settings
-    hp_gamma  = 1e-8                # global DP concentration param (higher encourages more global classes to be created)
-    hp_a0     = 1e-6                 # document-wise DP concentration param (higher encourages more document groups to be created)
+    hp_gamma  = 1                # global DP concentration param (higher encourages more global classes to be created)
+    hp_a0     = 1                 # document-wise DP concentration param (higher encourages more document groups to be created)
     hp_n      = dim*2                # Wishart Deg. of Freedom (must be > d-1)
     hp_k      = 2                 # mean prior - covariance scaling param
     hp_mu     = np.ones((dim,))      # mean prior - location param (d-rank vector)
@@ -128,19 +131,17 @@ def run_sampler():
     # rather than recompute class avgs/scatter-matrix on each sample, maintain per-class data outer-product
     # and sum (for re-evaluating class avg) and simply update for each member insert/remove
     # each of these classes exposes insert(v)/remove(v) methods and value property
+    helpers.ModelEvidence.dim_0 = dim
     helpers.ModelEvidence.n_0 = hp_n
     helpers.ModelEvidence.k_0 = hp_k
     helpers.ModelEvidence.mu_0 = hp_mu
-    prior    = helpers.ModelEvidence(dim=dim, covariance=hp_lbdinv)
-    evidence = [helpers.ModelEvidence(dim=dim,
-                                      count=totaldataitems,
-                                      sum=np.sum( np.sum(doc, axis=0) for doc in docs ),
-                                      outprod=np.sum( np.sum( np.outer(doc[i,:], doc[i,:]) for i in range(doc.shape[0]) ) for doc in docs ),
-                                      covariance=hp_lbdinv)]  # len==Nk at all times
-    n = [[Ni[j]] for j in range(Nj)]  # len==Nj at all times for outerlist, len==Nt[j] at all times for inner list
+    helpers.ModelEvidence.lbdinv_0 = hp_lbdinv
+    prior    = helpers.ModelEvidence()
+    evidence = [helpers.ModelEvidence() for i in range(init_nclasses)] # len==Nk at all times
+    n = [[0]*init_nclasses for j in range(Nj)]  # len==Nj at all times for outerlist, len==Nt[j] at all times for inner list
                                       #     counts number of data items in doc j assigned to group t
                                       #     index as: n[j][t]
-    m = [Nj]                          # len==Nk at all times; counts number of groups (t) with cluster assigned to k
+    m = [init_nclasses for i in range(init_nclasses)]   # len==Nk at all times; counts number of groups (t) with cluster assigned to k
                                       #     index as: m[k]
                                       # we can obtain m_dotdot (global number of groups) by summing elements in m
 
@@ -162,15 +163,19 @@ def run_sampler():
     #   index as: k_coll[j].value[t]  [size of inner list will change with Nt]
     k_coll = [Trace(burnin=burnin) for i in range(Nj)]
 
-    # wts on cat. distribition over k+1 possible cluster ids from root DP
-    #   index as b[k] for k=1...Nk+1 (last element is wt of new cluster)
-    beta = Trace(burnin=burnin)
-
-    # Properly initialize - all data items in a single group for each doc assigned to a single global class
-    for j in range(Nj):
+    # Properly initialize - random init among p groups per image and p global groups (p==init_nclasses)
+    logger.debug("started adding all data items to initial class")
+    for j, doc in enumerate(docs):
         t_coll[j].append( np.zeros((Ni[j],), dtype=np.uint32) )
-        k_coll[j].append( [0] )
-    beta.append( helpers.sampleDirDist([1, 1]) )  # begin with uninformative sampling
+        k_coll[j].append( [0]*init_nclasses )
+        for t in range(init_nclasses):
+            k_coll[j].value[t] = t
+        for i, data in enumerate(doc):
+            r = random.randrange(init_nclasses)
+            evidence[r].insert(data)
+            n[j][r] += 1
+            t_coll[j].value[i] = r
+    logger.debug("finished adding all data items to initial class")
 
     # history tracking variables
     ss_iter = None # make available to function closures
@@ -192,6 +197,14 @@ def run_sampler():
         return len(k_coll[j].value)
     def numClasses():
         return len(m)
+    def createNewGroup():
+        pass
+    def createNewClass():
+        m.append(1)
+        # create a tracked evidence object for the new class
+        evidence.append(helpers.ModelEvidence())
+        logger.debug2('new class created: k[{}]; {} active classes (+{} empty)'.format(
+            numActiveClasses(), numActiveClasses(), numClasses()-numActiveClasses()))
 
     def savePlots():
         """Create iteration histories of useful variables"""
@@ -231,9 +244,13 @@ def run_sampler():
         with open(fname, 'wb') as f:
             pickle.dump([t_coll, k_coll, sizes], f)
             logger.info('data saved to "{}"'.format(fname))
+    CLEANUP = cleanup
 
-    # register SIGINT handler
-    def exit_early(signal, frame):
+    # register SIGINT handler (ctrl-c)
+    def exit_early(sig, frame):
+        # kill immediately on next press of ctrl-c
+        signal.signal(signal.SIGINT, lambda sig, frame: sys.exit(1))
+
         logger.warning('SIGINT recieved. Cleaning up and exiting early')
         cleanup(fname='data@iter#{}.pickle'.format(ss_iter))
         sys.exit(1)
@@ -247,89 +264,118 @@ def run_sampler():
         logger.debug('Beginning Sampling Iteration {}'.format(ss_iter+1))
 
         # generate random permutation over document indices and iterate
-        for j in rand.permutation(Nj):
+        jpermutation = rand.permutation(Nj)
+        for j in jpermutation:
             # create new trace histories from previous history
             t_coll[j].beginNewSample()
             k_coll[j].beginNewSample()
 
             # gen. rand. permutation over elements in document
-            for i in rand.permutation(Ni[j]):
+            ipermutation = rand.permutation(Ni[j])
+            for i in ipermutation:
                 logger.debug3('ss_iter={}, j={}, i={}'.format(ss_iter, j, i))
                 data = docs[j][i,:]
+
+                m_items = [0]*len(m)
+                for jj in range(Nj):
+                    for tt in range(len(n[jj])):
+                        m_items[k_coll[jj].value[tt]] += n[jj][tt]
+                if True or [e.count for e in evidence] != m_items:
+                    logger.debug3("Evidence counts and m, n containers do not agree\n" +
+                                         "data in evidence: {}\n".format([e.count for e in evidence]) +
+                                         "data in m: {}\n".format(m_items) +
+                                         "m: {}\n".format(m) +
+                                         "n[j]: {}\n".format(n[j]) +
+                                         "k_coll[j].value: {}".format(k_coll[j].value) )
 
                 # get previous assignments
                 tprev = t_coll[j].value[i]
                 kprev = k_coll[j].value[tprev]
-                evidence_kprev = evidence[kprev]
 
                 # remove count from group tprev, class kprev
                 n[j][tprev] -= 1
+                evidence[kprev].remove(data)
                 logger.debug3('n[{}][{}]-- -> {}'.format(j, tprev, n[j][tprev]))
                 # handle empty group in doc j
                 if isGroupEmpty(j, tprev):
                     logger.debug2('Group {} in doc {} emptied'.format(tprev, j))
                     n[j][tprev] = 0 # probably not necessary
                     m[kprev] -= 1
-                    #  del n[j][tprev]       # forget number of data items in empty group
-                    #  del k_coll[j][tprev]  # forget cluster assignment for empty group
 
                     # handle empty global cluster
                     if isClassEmpty(kprev):
+                        m[kprev] = 0
                         logger.debug2('Class {} emptied'.format(kprev))
-                        #  del m[kprev]
-                        #  del evidence[kprev]
-
-                # remove data item from evidence for class k only if class k still exists
-                if not isClassEmpty(kprev):
-                    evidence_kprev.remove(data)
 
                 # SAMPLING
                 # sample tnext
                 Nt = numGroups(j)
                 Nk = numClasses()
                 margL = np.zeros((Nk,))
-                for k in range(Nk):
-                    if isClassEmpty(k):
-                        continue
-                    margL[k] = helpers.marginalLikelihood(data, evidence[k])
+                for kk in range(Nk):
+                    if isClassEmpty(kk): continue
+                    margL[kk] = helpers.marginalLikelihood(data, evidence[kk])
                 margL_prior = helpers.marginalLikelihood(data, prior)
                 mrf_args = (i, t_coll[j].value, sizes[j], mrf_lbd, k_coll[j].value)
-                tnext = helpers.sampleT(n[j], k_coll[j].value, beta.value, hp_a0, margL, margL_prior, mrf_args)
+                tnext = helpers.sampleT(n[j], k_coll[j].value, m+[hp_gamma], hp_a0, margL, margL_prior, mrf_args)
                 t_coll[j].value[i] = tnext
-                logger.debug3('tnext={} of [0..{}] ({} empty)'.format( tnext, Nt-1, Nt-numActiveGroups(j) ))
-
-                # conditionally sample knext if tnext=tnew
-                logger.debug3('tnext={}, Nt={}'.format(tnext, Nt))
+                logger.debug3('tnext={} of [0..{}] (Nt={}, {} empty)'.format( tnext, Nt-1, Nt, Nt-numActiveGroups(j) ))
                 if tnext >= Nt:
+                    # conditionally sample knext for tnext=tnew
                     n[j].append(1)
                     logger.debug2('new group created: t[{}][{}]; {} active groups in doc {} (+{} empty)'.format(
                         j, tnext, numActiveGroups(j), j, Nt+1-numActiveGroups(j) ))
-                    knext = helpers.sampleK(beta.value, margL, margL_prior)
+                    knext = helpers.sampleK(m+[hp_gamma], margL, margL_prior)
                     k_coll[j].value.append(knext)
                     logger.debug3('knext={} of [0..{}] ({} empty)'.format(knext, Nk-1, Nk-numActiveClasses()))
-                    if knext >= Nk:
-                        m.append(1)
-                        # add to beta
-                        beta.value = helpers.augmentBeta(beta.value, hp_gamma)
-                        logger.debug2('new class created: k[{}]; {} active classes (+{} empty)'.format(
-                            knext, numActiveClasses(), Nk+1-numActiveClasses()))
-                        evidence.append(helpers.ModelEvidence(dim=dim, covariance=hp_lbdinv))
-                    else:
-                        m[knext] += 1
+                    if knext >= Nk: createNewClass()
+                    else: m[knext] += 1
                     logger.debug3('m[{}]++ -> {}'.format(knext, m[knext]))
                 else:
                     n[j][tnext] += 1
-                    logger.debug3('n[{}][{}]++ -> {}'.format(j, tnext, n[j][tnext]))
                     knext = k_coll[j].value[tnext]
-
-                # insert data into newly assigned cluster evidence
+                    logger.debug3('n[{}][{}]++ -> {}'.format(j, tnext, n[j][tnext]))
                 evidence[knext].insert(data)
-
                 logger.debug3('')
+            # END Pixel loop
 
-        # sample beta
-        beta.beginNewSample()
-        beta.value = helpers.sampleBeta(m, hp_gamma)
+            tpermutation = rand.permutation(numGroups(j))
+            for t in tpermutation:
+                if isGroupEmpty(j, t): continue
+
+                # sampling from k dist where all data items from group tnext have been removed from a
+                #     temporary model evidence object. Uses IID assumption and giving joint dist. as
+                #     product of individual data item margLikelihoods
+                Nk=numClasses()
+                kprev = k_coll[j].value[t]
+                m[kprev] -= 1
+
+                # remove all data items from evidence of k_t
+                evidence_copy = evidence[kprev].copy()
+                data_t = docs[j][t_coll[j].value==t, :]
+                for data in data_t:
+                    evidence_copy.remove(data)
+
+                # compute joint marginal likelihoods for data in group tnext
+                jointMargL = np.zeros((Nk,))
+                for kk in range(Nk):
+                    if isClassEmpty(kk): continue
+                    jointMargL[kk] = helpers.jointMarginalLikelihood(data_t, evidence_copy if kk==kprev else evidence[kk])
+                jointMargL_prior = helpers.jointMarginalLikelihood(data_t, prior)
+                knext = helpers.sampleK(m+[hp_gamma], jointMargL, jointMargL_prior)
+                if knext >= Nk: createNewClass()
+                else: m[knext] += 1
+
+                # we can use reduced evidence as new evidence for kprev and add data to evidence for knext
+                # if knext=kprev, we just leave the unmodified evidence object in place and do nothing
+                if knext != kprev:
+                    k_coll[j].value[t] = knext
+                    evidence[kprev] = evidence_copy
+                    for data in data_t:
+                        evidence[knext].insert(data)
+            #  time.sleep(10)
+            # END group loop
+        # END Image loop
 
         # save tracked history variables
         hist_numclasses_active.append(numActiveClasses())
@@ -348,6 +394,19 @@ def run_sampler():
             fileio.savefigure(kcollection, fname, header='class labels', footer='iter: {:4g}, # active classes: {}'.format(
                 ss_iter+1, numActiveClasses()))
 
+            # DEBUG
+            if verbose >= 3:
+                tcollection = [np.array(t_coll[j].value).reshape(sizes[j])
+                               for j in range(Nj)]
+                fname = os.path.join(p_figs, 'iter_{:04}_t_value'.format(ss_iter+1))
+                fileio.savefigure(tcollection, fname, header='region labels', footer='iter: {}'.format(ss_iter+1))
+
+                kcollection = [helpers.constructfullKMap(tcollection[j], k_coll[j].value)
+                               for j in range(Nj)]
+                fname = os.path.join(p_figs, 'iter_{:04}_k_value'.format(ss_iter+1))
+                fileio.savefigure(kcollection, fname, header='class labels', footer='iter: {:4g}, # active classes: {}'.format(
+                    ss_iter+1, numActiveClasses()))
+
     # log summary, generate plots, save checkpoint data
     cleanup()
 
@@ -360,3 +419,4 @@ if __name__ == '__main__':
         msg = 'Exception occured: {!s}'.format(e)
         logger.exception(msg)
         if NOTIFY: pushNotification('Exception - {}'.format(__name__), msg)
+        if callable(CLEANUP): CLEANUP()

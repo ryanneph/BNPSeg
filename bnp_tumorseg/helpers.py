@@ -5,6 +5,7 @@ import numpy.random as rand
 from numpy.linalg import cholesky, solve
 from scipy import special
 from datetime import datetime
+from copy import copy, deepcopy
 import choldate
 import logging
 
@@ -14,7 +15,7 @@ eps = 1e-12
 def log(x):
     return math.log(x+eps)
 
-class ModelEvidence:
+class ModelEvidence():
     """Wrapper for updating cluster evidence through insertion/removal operations of each data item
     The following properties are exposed and updated/downdated using the class insert/remove methods:
 
@@ -27,39 +28,75 @@ class ModelEvidence:
     n_0 = None
     k_0 = None
     mu_0 = None
+    lbdinv_0 = None
+    dim_0 = None
 
-    def __init__(self, dim=1, **kwargs):
+    def __init__(self, **kwargs):
         # store evidence components
-        self._dim = dim
+        if 'dim' in kwargs:
+            self._dim = kwargs['dim']
+        elif self.dim_0 is not None:
+            self._dim = self.dim_0
+        else:
+            self._dim = 1
+
         if 'count' in kwargs:
             self._count = kwargs['count']
         else:
             self._count = 0
+
         if 'sum' in kwargs:
             self._sum = kwargs['sum']
         else:
-            self._sum = np.zeros((dim,))
+            self._sum = np.zeros((self._dim,))
+
         if 'outprod' in kwargs:
             self._outprod = kwargs['outprod']
         else:
-            self._outprod = np.zeros((dim, dim))
+            self._outprod = np.zeros((self._dim, self._dim))
+
         if 'Lstar' in kwargs:
             self._cholcov = kwargs['Lstar']
         elif 'covariance' in kwargs:
             self._cholcov = cholesky(kwargs['covariance']).T
+        elif self.lbdinv_0 is not None:
+            self._cholcov = cholesky(self.lbdinv_0)
         else:
-            self._cholcov = np.zeros((dim, dim))
+            self._cholcov = np.zeros((self._dim, self._dim))
+
+    def __copy__(self):
+        obj = ModelEvidence()
+        obj._dim = copy(self._dim)
+        obj._count = copy(self._count)
+        obj._sum = copy(self._sum)
+        obj._outprod = copy(self._outprod)
+        obj._cholcov = copy(self._cholcov)
+        return obj
+
+    def __deepcopy__(self, memodict):
+        obj = ModelEvidence()
+        obj._dim = deepcopy(self._dim, memodict)
+        obj._count = deepcopy(self._count, memodict)
+        obj._sum = deepcopy(self._sum, memodict)
+        obj._outprod = deepcopy(self._outprod, memodict)
+        obj._cholcov = deepcopy(self._cholcov, memodict)
+        return obj
+
+    def copy(self):
+        return deepcopy(self)
 
     def insert(self, x):
         self._count += 1
         self._insert_sum(x)
-        self._insert_outprod(x)
+        #  self._insert_outprod(x)
         self._insert_cholcov(x)
 
     def remove(self, x):
+        if self._count <=0:
+            raise RuntimeError('ModelEvidence has no data items to remove')
         self._count -= 1
         self._remove_sum(x)
-        self._remove_outprod(x)
+        #  self._remove_outprod(x)
         self._remove_cholcov(x)
 
     def _insert_sum(self, x):
@@ -80,7 +117,7 @@ class ModelEvidence:
 
     def _remove_cholcov(self, v):
         # count has already been decremented by 1, so we add 1 from each count
-        choldate.choldowndate(self._cholcov, sqrt((self.k_0 + self._count)/(self.k_0 + self._count+1)) * (self.mu_m + v) )
+        choldate.choldowndate(self._cholcov, sqrt((self.k_0 + self._count)/(self.k_0 + self._count+1)) * (self.mu_m - v) )
 
     @property
     def count(self):
@@ -107,6 +144,7 @@ class ModelEvidence:
     def cholcov_m(self):
         # return lower triangular matrix L
         return self._cholcov.T
+        #  return cholesky(self.lbdinv_0 + self.outprod - (self.k_0 + self.count)*np.outer(self.mu_m, self.mu_m) + self.k_0*np.outer(self.mu_0, self.mu_0)).T
 
     # Class Evidence States
     @property
@@ -120,7 +158,8 @@ class ModelEvidence:
     # Convenience
     @property
     def avg(self):
-        return self._sum / self._count
+        if self._count <= 0: return 0
+        else: return self._sum / self._count
 
 
 def gamma(x):
@@ -129,7 +168,7 @@ def gamma(x):
 
 def gammaln(x):
     """computes natural log of the gamma function which is more numerically stable than the gamma"""
-    return special.gammaln(x)
+    return special.gammasgn(x)*special.gammaln(x)
 
 def choleskyQuadForm(L, b):
     """Compute quadratic form: b' * A^(-1) * b  using the cholesky inverse to reduce the problem to solving Lx=b where L is the
@@ -166,14 +205,17 @@ def sampleCatDist(wts):
     wtsum = np.sum(wts)
     if wtsum<=0 or wtsum==np.NaN or wtsum==np.Inf:
         # usually occurs becuase margL is 0 for all classes
+        # TODO: should set to [0, ..., 0, 1] indicating guaranteed new class
         logger.warning("unstable categorical weights vector with sum(wts)={}.".format(wtsum))
+        #  raise RuntimeError
         wts = np.ones_like(wts) / len(wts)
         logger.warning("Setting uniform weights: {}".format(wts))
     else:
         # normalize
         wts = wts / np.sum(wts)
+        logger.debug3('cat wts: {}'.format(wts))
         # check for invalid params
-        if not ((0<=wts).all and (wts<=1).all() and math.isclose(np.sum(wts), 1)):
+        if __debug__ and not ((0<=wts).all and (wts<=1).all() and math.isclose(np.sum(wts), 1)):
             raise AssertionError("invalid categorical weights vector: {}".format(str(wts)))
     return np.nonzero(rand.multinomial(1, wts))[0][0]
 
@@ -188,7 +230,7 @@ def sampleDirDist(alpha):
     """
     return rand.dirichlet(alpha).tolist()
 
-def marginalLikelihood(x: np.ndarray, evidence: ModelEvidence):
+def logMarginalLikelihood(x: np.ndarray, evidence: ModelEvidence):
     """Computes marginal likelihood for a data vector given the model evidence of a Gaussian-Wishart
     conjugate prior model using cholesky decmomposition of scaling matrix to increase efficiency.
 
@@ -216,20 +258,31 @@ def marginalLikelihood(x: np.ndarray, evidence: ModelEvidence):
     c = (k_m+1)/(k_m*nu)
 
     # compute student's T density given updated params
-    tdensln = gammaln(0.5*(n_m+1)) - gammaln(0.5*nu) - (0.5*d)*(log(nu*pi) - log(c)) \
-            - 0.5*choleskyLogDet(L) \
-            - (0.5*(nu+d))*log(1+ (1/(c*nu))*choleskyQuadForm(L, x-mu_m))
-    tdens = exp(tdensln)
-    if tdens == 0 and False:
+    tdensln = gammaln(0.5*(n_m+1)) - gammaln(0.5*nu) \
+            - 0.5*(d*(log(nu*pi) + log(c)) + choleskyLogDet(L)) \
+            - (0.5*(n_m+1))*log(1+ (1/(c*nu))*choleskyQuadForm(L, x-mu_m))
+    if __debug__ and not tdensln<=0:
+        tdens = exp(tdensln)
         print("tdensln", tdensln)
-        print("1",gammaln(0.5*(n_m+1)) - gammaln(0.5*nu) - (0.5*d)*(log(nu*pi) - log(c)))
+        print("1",gammaln(0.5*(n_m+1)) - gammaln(0.5*nu) - (0.5*d)*(log(nu*pi) + log(c)))
         print("2",choleskyLogDet(L))
-        print("3",(-0.5*(nu+d))*log(1+ (1/(c*nu))*choleskyQuadForm(L, x-mu_m)))
-    if not 0<=tdens<=1:
+        print("3",(0.5*(n_m+1))*log(1+ (1/(c*nu))*choleskyQuadForm(L, np.abs(x-mu_m))))
+        print("tdens", tdens)
         logger.warning('result of marginal likelihood is not a valid probability between 0->1: {:0.3e}'.format(tdens))
-        # TODO: Why is this sometimes producing tdens >1?
-        tdens = 1
-    return tdens
+    return tdensln
+
+def marginalLikelihood(x, evidence):
+    return exp(logMarginalLikelihood(x, evidence))
+
+def jointLogMarginalLikelihood(dataset, evidence):
+    """Compute joint marginal likelihood for a set of data items assuming IID"""
+    accum = 0
+    for x in dataset:
+        accum += logMarginalLikelihood(x, evidence)
+    return accum
+
+def jointMarginalLikelihood(dataset, evidence):
+    return exp(jointLogMarginalLikelihood(dataset, evidence))
 
 def likelihoodTnew(beta, margL, margL_prior):
     """calculate data likelihood given that data item belongs to new group tnew
@@ -248,7 +301,8 @@ def likelihoodTnew(beta, margL, margL_prior):
         val += margL[k] * beta[k]
     val += beta[-1] * margL_prior
     val /= np.sum(beta)
-    assert 0<=val<=1
+    if __debug__ and not 0<=val<=1:
+        logger.warning('invalid likelihood encountered: {}'.format(val))
     return val
 
 def sampleT(n_j, k_j, beta, a0, margL, margL_prior, mrf_args=None):
@@ -285,7 +339,10 @@ def sampleK(beta, margL, margL_prior, mrf_args=None):
         if beta[k] <= 0:
             continue
         # k=kexist
-        wts[k] = beta[k] * margL[k]
+        try:
+            wts[k] = beta[k] * margL[k]
+        except:
+            print(wts.shape, len(beta), len(margL))
         if mrf_args is not None:
             wts[k] *= MRF(*mrf_args, k=k)
     wts[Nk] = beta[-1] * margL_prior # k=knew
