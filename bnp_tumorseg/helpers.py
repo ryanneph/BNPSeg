@@ -8,6 +8,7 @@ from datetime import datetime
 from copy import copy, deepcopy
 import choldate
 import logging
+import loggers
 
 logger = logging.getLogger(__name__)
 
@@ -261,14 +262,14 @@ def logMarginalLikelihood(x: np.ndarray, evidence: ModelEvidence):
     tdensln = gammaln(0.5*(n_m+1)) - gammaln(0.5*nu) \
             - 0.5*(d*(log(nu*pi) + log(c)) + choleskyLogDet(L)) \
             - (0.5*(n_m+1))*log(1+ (1/(c*nu))*choleskyQuadForm(L, x-mu_m))
-    if __debug__ and not tdensln<=0:
+    if __debug__ and not tdensln<=0 and logger.getEffectiveLevel() <= loggers.DEBUG3:
         tdens = exp(tdensln)
-        print("tdensln", tdensln)
-        print("1",gammaln(0.5*(n_m+1)) - gammaln(0.5*nu) - (0.5*d)*(log(nu*pi) + log(c)))
-        print("2",choleskyLogDet(L))
-        print("3",(0.5*(n_m+1))*log(1+ (1/(c*nu))*choleskyQuadForm(L, np.abs(x-mu_m))))
-        print("tdens", tdens)
-        logger.warning('result of marginal likelihood is not a valid probability between 0->1: {:0.3e}'.format(tdens))
+        msg = "tdensln: {}".format(tdensln) + \
+        "term 1: {}".format(gammaln(0.5*(n_m+1)) - gammaln(0.5*nu) - (0.5*d)*(log(nu*pi) + log(c))) + \
+        "term 2: {}".format(choleskyLogDet(L)) + \
+        "term 3: {}".format((0.5*(n_m+1))*log(1+ (1/(c*nu))*choleskyQuadForm(L, np.abs(x-mu_m)))) + \
+        "tdens:  {}".format(tdens)
+        logger.warning('result of marginal likelihood is not a valid probability between 0->1: {:0.3e}\n{}'.format(tdens, msg))
     return tdensln
 
 def marginalLikelihood(x, evidence):
@@ -301,7 +302,7 @@ def likelihoodTnew(beta, margL, margL_prior):
         val += margL[k] * beta[k]
     val += beta[-1] * margL_prior
     val /= np.sum(beta)
-    if __debug__ and not 0<=val<=1:
+    if __debug__ and not 0<=val<=1 and logger.getEffectiveLevel() <= loggers.DEBUG3:
         logger.warning('invalid likelihood encountered: {}'.format(val))
     return val
 

@@ -58,10 +58,12 @@ def run_sampler():
     parser.add_argument('--smoothlvl', type=np.float, default=default_smoothlvl, help='Set the level of smoothing on class labels')
     parser.add_argument('--resamplefactor', type=np.float, default=default_resamplefactor, help='Set the resampling factor applied to input images')
     parser.add_argument('--ftype', type=str, choices=['float32', 'float64'], default=default_ftype, help='set floating point bit-depth')
+    parser.add_argument('--resume-from', type=str, default=None, help='continue sampling from pickled results path')
     # parse args
     args = parser.parse_args()
     ftype = args.ftype
-    datapath = os.path.join(data_root, args.dataset)
+    dataset = args.dataset
+    datapath = os.path.join(data_root, dataset)
     smoothlvl = max(0, args.smoothlvl)
     resamplefactor = max(0.01, min(4, args.resamplefactor))
     visualize = args.visualize
@@ -69,11 +71,21 @@ def run_sampler():
     verbose = args.verbose
     maxiter = args.maxiter
     burnin = args.burnin
+    resume = args.resume_from
+
+    if resume:
+        with open(resume, 'rb') as f:
+            dataset, ss_iter, hist_numclasses, hist_numclasses_active,\
+                    docs, sizes, dim, t_coll, k_coll, evidence, m, n = pickle.load(f)
+        ss_iter -= 1
+        for trace in t_coll + k_coll:
+            trace.burnin = burnin
+        logger.info('resuming at iter {} from "{}" data in "{}"'.format(ss_iter, dataset, resume))
 
     # make output directories
-    p_figs  = os.path.join(figs_dir, args.dataset)
-    p_blobs = os.path.join(blobs_dir, args.dataset)
-    p_logs  = os.path.join(logs_dir, args.dataset)
+    p_figs  = os.path.join(figs_dir, dataset)
+    p_blobs = os.path.join(blobs_dir, dataset)
+    p_logs  = os.path.join(logs_dir, dataset)
     for dname in [data_root, p_figs, p_logs, p_blobs]:
         os.makedirs(dname, exist_ok=True)
 
@@ -85,10 +97,6 @@ def run_sampler():
     else:
         logger.setLevel(loggers.DEBUG+1-verbose)
 
-    # standardize usage of float type according to '--ftype' arg
-    def float(x):
-        return np.dtype(ftype).type(x)
-
     # semi-permanent settings
     rand.seed(21) #numpy
     random.seed(21) #python
@@ -98,11 +106,11 @@ def run_sampler():
     # Model Definition #
     #==================#
     # load data - load each image as a separate document (j)
-    logger.info('loading images from {}.....'.format(datapath))
-    docs, sizes, dim = fileio.loadImageSet(datapath, ftype=ftype, resize=resamplefactor)
+    if not resume:
+        logger.info('loading images from {}.....'.format(datapath))
+        docs, sizes, dim = fileio.loadImageSet(datapath, ftype=ftype, resize=resamplefactor)
     Nj = len(docs)                       # number of images
     Ni = [doc.shape[0] for doc in docs]  # list of image sizes (linear)
-    totaldataitems = np.sum(Ni)
     if visualize:
         imcollection = [np.array(docs[j]).reshape((*sizes[j], dim))
                        for j in range(Nj)]
@@ -112,7 +120,7 @@ def run_sampler():
 
     # hyperparameter settings
     hp_gamma  = 1                # global DP concentration param (higher encourages more global classes to be created)
-    hp_a0     = 1                 # document-wise DP concentration param (higher encourages more document groups to be created)
+    hp_a0     = hp_gamma         # document-wise DP concentration param (higher encourages more document groups to be created)
     hp_n      = dim*2                # Wishart Deg. of Freedom (must be > d-1)
     hp_k      = 2                 # mean prior - covariance scaling param
     hp_mu     = np.ones((dim,))      # mean prior - location param (d-rank vector)
@@ -137,50 +145,51 @@ def run_sampler():
     helpers.ModelEvidence.mu_0 = hp_mu
     helpers.ModelEvidence.lbdinv_0 = hp_lbdinv
     prior    = helpers.ModelEvidence()
-    evidence = [helpers.ModelEvidence() for i in range(init_nclasses)] # len==Nk at all times
-    n = [[0]*init_nclasses for j in range(Nj)]  # len==Nj at all times for outerlist, len==Nt[j] at all times for inner list
-                                      #     counts number of data items in doc j assigned to group t
-                                      #     index as: n[j][t]
-    m = [init_nclasses for i in range(init_nclasses)]   # len==Nk at all times; counts number of groups (t) with cluster assigned to k
-                                      #     index as: m[k]
-                                      # we can obtain m_dotdot (global number of groups) by summing elements in m
+    if not resume:
+        evidence = [helpers.ModelEvidence() for i in range(init_nclasses)] # len==Nk at all times
+        n = [[0]*init_nclasses for j in range(Nj)]  # len==Nj at all times for outerlist, len==Nt[j] at all times for inner list
+                                          #     counts number of data items in doc j assigned to group t
+                                          #     index as: n[j][t]
+        m = [init_nclasses for i in range(init_nclasses)]   # len==Nk at all times; counts number of groups (t) with cluster assigned to k
+                                          #     index as: m[k]
+                                          # we can obtain m_dotdot (global number of groups) by summing elements in m
 
-    # initialize latent parameters - traces will be saved
-    #  z_coll = [Trace() for i in range(Nj)]    # nested collection of cluster assignment (int) traces for each item in each doc
-    #                                           #     each is a numpy int array indicating full document cluster assignments
-    #                                           #     index as: z_coll[j][i] - produces array of class assignment
-    #  m_coll = [Trace()]                       # expected number of "groups" - len==Nk at all times, each Trace
-    #                                           #     is array with shape=(Nj,)
-    #                                           #     index as: m_coll[k][j]
+        # initialize latent parameters - traces will be saved
+        #  z_coll = [Trace() for i in range(Nj)]    # nested collection of cluster assignment (int) traces for each item in each doc
+        #                                           #     each is a numpy int array indicating full document cluster assignments
+        #                                           #     index as: z_coll[j][i] - produces array of class assignment
+        #  m_coll = [Trace()]                       # expected number of "groups" - len==Nk at all times, each Trace
+        #                                           #     is array with shape=(Nj,)
+        #                                           #     index as: m_coll[k][j]
 
-    # nested collection of group assignment (int) traces for each item in each doc
-    #   each item is np.array of integers between 0..(Tj)-1
-    #   index as: t_coll[j].value[i]  [size doesnt change]
-    t_coll = [Trace(burnin=burnin) for i in range(Nj)]
+        # nested collection of group assignment (int) traces for each item in each doc
+        #   each item is np.array of integers between 0..(Tj)-1
+        #   index as: t_coll[j].value[i]  [size doesnt change]
+        t_coll = [Trace(burnin=burnin) for i in range(Nj)]
 
-    # nested collection of cluster assignment (int) traces for each group in each
-    #   doc. Each item is list of integers between 0..K-1
-    #   index as: k_coll[j].value[t]  [size of inner list will change with Nt]
-    k_coll = [Trace(burnin=burnin) for i in range(Nj)]
+        # nested collection of cluster assignment (int) traces for each group in each
+        #   doc. Each item is list of integers between 0..K-1
+        #   index as: k_coll[j].value[t]  [size of inner list will change with Nt]
+        k_coll = [Trace(burnin=burnin) for i in range(Nj)]
 
-    # Properly initialize - random init among p groups per image and p global groups (p==init_nclasses)
-    logger.debug("started adding all data items to initial class")
-    for j, doc in enumerate(docs):
-        t_coll[j].append( np.zeros((Ni[j],), dtype=np.uint32) )
-        k_coll[j].append( [0]*init_nclasses )
-        for t in range(init_nclasses):
-            k_coll[j].value[t] = t
-        for i, data in enumerate(doc):
-            r = random.randrange(init_nclasses)
-            evidence[r].insert(data)
-            n[j][r] += 1
-            t_coll[j].value[i] = r
-    logger.debug("finished adding all data items to initial class")
+        # Properly initialize - random init among p groups per image and p global groups (p==init_nclasses)
+        logger.debug("started adding all data items to initial class")
+        for j, doc in enumerate(docs):
+            t_coll[j].append( np.zeros((Ni[j],), dtype=np.uint32) )
+            k_coll[j].append( [0]*init_nclasses )
+            for t in range(init_nclasses):
+                k_coll[j].value[t] = t
+            for i, data in enumerate(doc):
+                r = random.randrange(init_nclasses)
+                evidence[r].insert(data)
+                n[j][r] += 1
+                t_coll[j].value[i] = r
+        logger.debug("finished adding all data items to initial class")
 
-    # history tracking variables
-    ss_iter = None # make available to function closures
-    hist_numclasses        = []
-    hist_numclasses_active = []
+        # history tracking variables
+        hist_numclasses        = []
+        hist_numclasses_active = []
+        ss_iter = 0 # make available to function closures
 
     #==========#
     # Fxn Defs #
@@ -225,6 +234,31 @@ def run_sampler():
             fig.clear()
         plt.close(fig)
 
+    def make_class_maps():
+        tcollection = [np.array(t_coll[j].mode(burn=(ss_iter>burnin))).reshape(sizes[j])
+                       for j in range(Nj)]
+        fname = os.path.join(p_figs, 'iter_{:04}_t'.format(ss_iter+1))
+        fileio.savefigure(tcollection, fname, header='region labels', footer='iter: {}'.format(ss_iter+1))
+
+        kcollection = [helpers.constructfullKMap(tcollection[j], k_coll[j].mode(burn=(ss_iter>burnin)))
+                       for j in range(Nj)]
+        fname = os.path.join(p_figs, 'iter_{:04}_k'.format(ss_iter+1))
+        fileio.savefigure(kcollection, fname, header='class labels', footer='iter: {:4g}, # active classes: {}'.format(
+            ss_iter+1, numActiveClasses()))
+
+        # DEBUG
+        if verbose >= 3:
+            tcollection = [np.array(t_coll[j].value).reshape(sizes[j])
+                           for j in range(Nj)]
+            fname = os.path.join(p_figs, 'iter_{:04}_t_value'.format(ss_iter+1))
+            fileio.savefigure(tcollection, fname, header='region labels', footer='iter: {}'.format(ss_iter+1))
+
+            kcollection = [helpers.constructfullKMap(tcollection[j], k_coll[j].value)
+                           for j in range(Nj)]
+            fname = os.path.join(p_figs, 'iter_{:04}_k_value'.format(ss_iter+1))
+            fileio.savefigure(kcollection, fname, header='class labels', footer='iter: {:4g}, # active classes: {}'.format(
+                ss_iter+1, numActiveClasses()))
+
     def cleanup(fname="final_data.pickle"):
         """report final groups and classes"""
         logger.info('Sampling Completed')
@@ -242,7 +276,8 @@ def run_sampler():
         # save data to file
         fname = os.path.join(p_blobs, fname)
         with open(fname, 'wb') as f:
-            pickle.dump([t_coll, k_coll, sizes], f)
+            pickle.dump([dataset, ss_iter, hist_numclasses, hist_numclasses_active,\
+                         docs, sizes, dim, t_coll, k_coll, evidence, m, n], f)
             logger.info('data saved to "{}"'.format(fname))
     CLEANUP = cleanup
 
@@ -259,8 +294,8 @@ def run_sampler():
     #==========#
     # Sampling #
     #==========#
-    ss_iter = 0
-    for ss_iter in range(maxiter):
+    for _ in range(ss_iter, maxiter):
+        ss_iter += 1
         logger.debug('Beginning Sampling Iteration {}'.format(ss_iter+1))
 
         # generate random permutation over document indices and iterate
@@ -381,31 +416,9 @@ def run_sampler():
         hist_numclasses_active.append(numActiveClasses())
         hist_numclasses.append(numClasses())
 
-        # display class maps
+        # write current results
         if visualize:
-            tcollection = [np.array(t_coll[j].mode(burn=(ss_iter>burnin))).reshape(sizes[j])
-                           for j in range(Nj)]
-            fname = os.path.join(p_figs, 'iter_{:04}_t'.format(ss_iter+1))
-            fileio.savefigure(tcollection, fname, header='region labels', footer='iter: {}'.format(ss_iter+1))
-
-            kcollection = [helpers.constructfullKMap(tcollection[j], k_coll[j].mode(burn=(ss_iter>burnin)))
-                           for j in range(Nj)]
-            fname = os.path.join(p_figs, 'iter_{:04}_k'.format(ss_iter+1))
-            fileio.savefigure(kcollection, fname, header='class labels', footer='iter: {:4g}, # active classes: {}'.format(
-                ss_iter+1, numActiveClasses()))
-
-            # DEBUG
-            if verbose >= 3:
-                tcollection = [np.array(t_coll[j].value).reshape(sizes[j])
-                               for j in range(Nj)]
-                fname = os.path.join(p_figs, 'iter_{:04}_t_value'.format(ss_iter+1))
-                fileio.savefigure(tcollection, fname, header='region labels', footer='iter: {}'.format(ss_iter+1))
-
-                kcollection = [helpers.constructfullKMap(tcollection[j], k_coll[j].value)
-                               for j in range(Nj)]
-                fname = os.path.join(p_figs, 'iter_{:04}_k_value'.format(ss_iter+1))
-                fileio.savefigure(kcollection, fname, header='class labels', footer='iter: {:4g}, # active classes: {}'.format(
-                    ss_iter+1, numActiveClasses()))
+            make_class_maps()
 
     # log summary, generate plots, save checkpoint data
     cleanup()
