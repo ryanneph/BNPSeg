@@ -19,6 +19,7 @@ from trace import Trace
 import fileio
 import loggers
 import helpers
+from evidence import ModelEvidenceNIW
 from notifications import pushNotification
 
 NOTIFY = False  # send push notifications on success/exception?
@@ -41,6 +42,7 @@ def run_sampler():
     default_burnin         = 40
     default_smoothlvl      = 10
     default_resamplefactor = 0.25
+    default_concentration  = 1
     default_ftype          = 'float64'
     default_dataset        = 'blackwhite_sub'
     default_visualize      = True
@@ -57,21 +59,23 @@ def run_sampler():
                         default=default_dataset, help='named testing dataset in {}'.format(data_root))
     parser.add_argument('--smoothlvl', type=np.float, default=default_smoothlvl, help='Set the level of smoothing on class labels')
     parser.add_argument('--resamplefactor', type=np.float, default=default_resamplefactor, help='Set the resampling factor applied to input images')
+    parser.add_argument('--concentration', type=np.float, default=default_concentration, help='Set the DP concentration parameter (low=few classes, high=many)')
     parser.add_argument('--ftype', type=str, choices=['float32', 'float64'], default=default_ftype, help='set floating point bit-depth')
     parser.add_argument('--resume-from', type=str, default=None, help='continue sampling from pickled results path')
     # parse args
     args = parser.parse_args()
-    ftype = args.ftype
-    dataset = args.dataset
-    datapath = os.path.join(data_root, dataset)
-    smoothlvl = max(0, args.smoothlvl)
+    ftype          = args.ftype
+    dataset        = args.dataset
+    datapath       = os.path.join(data_root, dataset)
+    smoothlvl      = max(0, args.smoothlvl)
     resamplefactor = max(0.01, min(4, args.resamplefactor))
-    visualize = args.visualize
-    NOTIFY = args.notify
-    verbose = args.verbose
-    maxiter = args.maxiter
-    burnin = args.burnin
-    resume = args.resume_from
+    concentration  = args.concentration
+    visualize      = args.visualize
+    NOTIFY         = args.notify
+    verbose        = args.verbose
+    maxiter        = args.maxiter
+    burnin         = args.burnin
+    resume         = args.resume_from
 
     if resume:
         with open(resume, 'rb') as f:
@@ -119,7 +123,7 @@ def run_sampler():
     logger.info('found {} images with dim={}'.format(len(docs), dim))
 
     # hyperparameter settings
-    hp_gamma  = 1                # global DP concentration param (higher encourages more global classes to be created)
+    hp_gamma  = concentration    # global DP concentration param (higher encourages more global classes to be created)
     hp_a0     = hp_gamma         # document-wise DP concentration param (higher encourages more document groups to be created)
     hp_n      = dim*2                # Wishart Deg. of Freedom (must be > d-1)
     hp_k      = 2                 # mean prior - covariance scaling param
@@ -139,14 +143,14 @@ def run_sampler():
     # rather than recompute class avgs/scatter-matrix on each sample, maintain per-class data outer-product
     # and sum (for re-evaluating class avg) and simply update for each member insert/remove
     # each of these classes exposes insert(v)/remove(v) methods and value property
-    helpers.ModelEvidence.dim_0 = dim
-    helpers.ModelEvidence.n_0 = hp_n
-    helpers.ModelEvidence.k_0 = hp_k
-    helpers.ModelEvidence.mu_0 = hp_mu
-    helpers.ModelEvidence.lbdinv_0 = hp_lbdinv
-    prior    = helpers.ModelEvidence()
+    ModelEvidenceNIW.dim_0 = dim
+    ModelEvidenceNIW.n_0 = hp_n
+    ModelEvidenceNIW.k_0 = hp_k
+    ModelEvidenceNIW.mu_0 = hp_mu
+    ModelEvidenceNIW.lbdinv_0 = hp_lbdinv
+    prior    = ModelEvidenceNIW()
     if not resume:
-        evidence = [helpers.ModelEvidence() for i in range(init_nclasses)] # len==Nk at all times
+        evidence = [ModelEvidenceNIW() for i in range(init_nclasses)] # len==Nk at all times
         n = [[0]*init_nclasses for j in range(Nj)]  # len==Nj at all times for outerlist, len==Nt[j] at all times for inner list
                                           #     counts number of data items in doc j assigned to group t
                                           #     index as: n[j][t]
@@ -211,7 +215,7 @@ def run_sampler():
     def createNewClass():
         m.append(1)
         # create a tracked evidence object for the new class
-        evidence.append(helpers.ModelEvidence())
+        evidence.append(ModelEvidenceNIW())
         logger.debug2('new class created: k[{}]; {} active classes (+{} empty)'.format(
             numActiveClasses(), numActiveClasses(), numClasses()-numActiveClasses()))
 
@@ -237,27 +241,27 @@ def run_sampler():
     def make_class_maps():
         tcollection = [np.array(t_coll[j].mode(burn=(ss_iter>burnin))).reshape(sizes[j])
                        for j in range(Nj)]
-        fname = os.path.join(p_figs, 'iter_{:04}_t'.format(ss_iter+1))
-        fileio.savefigure(tcollection, fname, header='region labels', footer='iter: {}'.format(ss_iter+1))
+        fname = os.path.join(p_figs, 'iter_{:04}_t'.format(ss_iter))
+        fileio.savefigure(tcollection, fname, header='region labels', footer='iter: {}'.format(ss_iter))
 
         kcollection = [helpers.constructfullKMap(tcollection[j], k_coll[j].mode(burn=(ss_iter>burnin)))
                        for j in range(Nj)]
-        fname = os.path.join(p_figs, 'iter_{:04}_k'.format(ss_iter+1))
+        fname = os.path.join(p_figs, 'iter_{:04}_k'.format(ss_iter))
         fileio.savefigure(kcollection, fname, header='class labels', footer='iter: {:4g}, # active classes: {}'.format(
-            ss_iter+1, numActiveClasses()))
+            ss_iter, numActiveClasses()))
 
         # DEBUG
         if verbose >= 3:
             tcollection = [np.array(t_coll[j].value).reshape(sizes[j])
                            for j in range(Nj)]
-            fname = os.path.join(p_figs, 'iter_{:04}_t_value'.format(ss_iter+1))
-            fileio.savefigure(tcollection, fname, header='region labels', footer='iter: {}'.format(ss_iter+1))
+            fname = os.path.join(p_figs, 'iter_{:04}_t_value'.format(ss_iter))
+            fileio.savefigure(tcollection, fname, header='region labels', footer='iter: {}'.format(ss_iter))
 
             kcollection = [helpers.constructfullKMap(tcollection[j], k_coll[j].value)
                            for j in range(Nj)]
-            fname = os.path.join(p_figs, 'iter_{:04}_k_value'.format(ss_iter+1))
+            fname = os.path.join(p_figs, 'iter_{:04}_k_value'.format(ss_iter))
             fileio.savefigure(kcollection, fname, header='class labels', footer='iter: {:4g}, # active classes: {}'.format(
-                ss_iter+1, numActiveClasses()))
+                ss_iter, numActiveClasses()))
 
     def cleanup(fname="final_data.pickle"):
         """report final groups and classes"""
@@ -296,7 +300,7 @@ def run_sampler():
     #==========#
     for _ in range(ss_iter, maxiter):
         ss_iter += 1
-        logger.debug('Beginning Sampling Iteration {}'.format(ss_iter+1))
+        logger.debug('Beginning Sampling Iteration {}'.format(ss_iter))
 
         # generate random permutation over document indices and iterate
         jpermutation = rand.permutation(Nj)
@@ -349,9 +353,9 @@ def run_sampler():
                 margL = np.zeros((Nk,))
                 for kk in range(Nk):
                     if isClassEmpty(kk): continue
-                    margL[kk] = helpers.marginalLikelihood(data, evidence[kk])
-                margL_prior = helpers.marginalLikelihood(data, prior)
-                mrf_args = (i, t_coll[j].value, sizes[j], mrf_lbd, k_coll[j].value)
+                    margL[kk] = evidence[kk].marginalLikelihood(data)
+                margL_prior = prior.marginalLikelihood(data)
+                mrf_args = (i, t_coll[j].value, sizes[j], mrf_lbd, k_coll[j].value) if mrf_lbd != 0 else None
                 tnext = helpers.sampleT(n[j], k_coll[j].value, m+[hp_gamma], hp_a0, margL, margL_prior, mrf_args)
                 t_coll[j].value[i] = tnext
                 logger.debug3('tnext={} of [0..{}] (Nt={}, {} empty)'.format( tnext, Nt-1, Nt, Nt-numActiveGroups(j) ))
@@ -395,8 +399,8 @@ def run_sampler():
                 jointMargL = np.zeros((Nk,))
                 for kk in range(Nk):
                     if isClassEmpty(kk): continue
-                    jointMargL[kk] = helpers.jointMarginalLikelihood(data_t, evidence_copy if kk==kprev else evidence[kk])
-                jointMargL_prior = helpers.jointMarginalLikelihood(data_t, prior)
+                    jointMargL[kk] = (evidence_copy if kk==kprev else evidence[kk]).jointMarginalLikelihood(data_t)
+                jointMargL_prior = prior.jointMarginalLikelihood(data_t)
                 knext = helpers.sampleK(m+[hp_gamma], jointMargL, jointMargL_prior)
                 if knext >= Nk: createNewClass()
                 else: m[knext] += 1
@@ -432,4 +436,4 @@ if __name__ == '__main__':
         msg = 'Exception occured: {!s}'.format(e)
         logger.exception(msg)
         if NOTIFY: pushNotification('Exception - {}'.format(__name__), msg)
-        if callable(CLEANUP): CLEANUP()
+        if callable(CLEANUP): CLEANUP(fname='data@error.pickle'.format())
