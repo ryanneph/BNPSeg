@@ -51,7 +51,10 @@ class Trace(MutableSequence):
     @property
     def stable_samples(self):
         """Returns the portion of the trace history after the burn-in period"""
-        return self._trace[self.burnin:]
+        try:
+            return self._trace[self.burnin:]
+        except IndexError as e:
+            logger.exception("no data exists after specified burn-in period of {} samples ({} recorded)".format(self.burnin, self.__len__()))
 
     def mode(self, burn=True):
         """Provides a dimensionality-independent way of calculating the statistical mode with support for

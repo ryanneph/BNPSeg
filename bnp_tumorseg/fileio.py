@@ -6,6 +6,9 @@ import numpy as np
 from PIL import Image
 from matplotlib import pyplot as plt
 import logging
+from pymedimage.misc import ensure_extension
+from pymedimage.rttypes import MaskableVolume
+
 
 logger = logging.getLogger(__name__)
 logging.getLogger('PIL').setLevel(logging.WARNING) # suppress PIL logging
@@ -20,6 +23,7 @@ def loadImageSet(dname, visualize=False, ftype='float32', normalize=True, resize
     """
     ims = []
     sizes = []
+    fnames = []
     common_dim = None
     for fname in sorted([os.path.join(dname, x) for x in os.listdir(dname) if os.path.isfile(os.path.join(dname,x))]):
         with open(fname, 'rb') as f:
@@ -66,8 +70,9 @@ def loadImageSet(dname, visualize=False, ftype='float32', normalize=True, resize
                 plt.show()
             ims.append(arr)
             sizes.append(im.size[::-1])
+            fnames.append(fname)
             logger.debug('loaded image: {}, (h,w)={}, shape=({})'.format(fname, sizes[-1], arr.shape))
-    return ims, sizes, common_dim
+    return ims, sizes, fnames, common_dim
 
 def plotChannels(arr):
     fig = plt.figure(figsize=(9,3))
@@ -80,7 +85,7 @@ def plotChannels(arr):
         ax.set_title(titles[i])
     return fig
 
-def savefigure(collection, fname, figsize=(10,10), cmap="Set3", header=None, footer=None):
+def saveMosaic(collection, fname, figsize=(10,10), cmap="Set3", header=None, footer=None):
     if cmap is None and collection[0].shape[-1] == 1:
         cmap="Greys"
 
@@ -118,3 +123,30 @@ def savefigure(collection, fname, figsize=(10,10), cmap="Set3", header=None, foo
 
     fig.savefig(fname)
     plt.close(fig)
+
+def saveImage(array, fname, mode='L', resize=None, cmap='Set3'):
+    array = np.squeeze(array)
+    if array.ndim != 2:
+        raise RuntimeError('Saving image with ndim={} is not supported'.format(array.ndim))
+
+    if mode in ['RGB', 'RGBA']:
+        # convert integer class ids to rgb colors according to cmap
+        rng = abs(np.max(array)-np.min(array))
+        if rng == 0: rng = 1
+        normarray = (array - np.min(array)) / rng
+        im = Image.fromarray(np.uint8(plt.cm.get_cmap(cmap)(normarray)*255))
+    elif mode in ['P']:
+        # separates gray values so they can be distinguished
+        array*=math.floor((255 / len(np.unique(array))))
+        im = Image.fromarray(array.astype('uint8'))
+    elif mode in ['1', 'L', 'P']:
+        im = Image.fromarray(array.astype('uint8'))
+    else: raise RuntimeError
+
+    # restore image to original dims
+    if isinstance(resize, numbers.Number) and resize>0 and not resize==1:
+        im = im.resize( [int(resize*s) for s in im.size], resample=Image.NEAREST)
+
+    fname = ensure_extension(fname, '.png')
+    im.save(fname)
+    logger.debug('file saved to {}'.format(fname))

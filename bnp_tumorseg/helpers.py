@@ -3,8 +3,8 @@ import numpy as np
 import numpy.random as rand
 from scipy import special
 import logging
-import loggers
-from wrappers import exp, log, gammaln
+from . import loggers
+from .wrappers import exp, log, gammaln
 
 logger = logging.getLogger(__name__)
 

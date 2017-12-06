@@ -4,8 +4,8 @@ from numpy.linalg import cholesky, solve
 from copy import copy, deepcopy
 import choldate
 import logging
-import loggers
-from wrappers import exp, log, gammaln
+from . import loggers
+from .wrappers import exp, log, gammaln
 
 logger = logging.getLogger(__name__)
 
