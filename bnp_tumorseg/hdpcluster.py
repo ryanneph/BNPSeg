@@ -296,14 +296,19 @@ def execute(root='.'):
                 logger.error('failed to save checkpoint data\n{}'.format(e))
 
         # register SIGINT handler (ctrl-c)
-        def exit_early(sig, frame):
+        exit_signal_recieved = False
+        def send_exit_signal(sig=None, frame=None):
+            nonlocal exit_signal_recieved
+            exit_signal_recieved = True
+        def exit_early(sig=None, frame=None):
             # kill immediately on next press of ctrl-c
             signal.signal(signal.SIGINT, lambda sig, frame: sys.exit(1))
 
             logger.warning('SIGINT recieved. Cleaning up and exiting early')
             cleanup(fname='data@iter#{}.pickle'.format(ss_iter))
             sys.exit(1)
-        signal.signal(signal.SIGINT, exit_early)
+        # advance to next safe breakpoint in sampler before exiting
+        signal.signal(signal.SIGINT, send_exit_signal)
 
         #==========#
         # Sampling #
@@ -329,13 +334,14 @@ def execute(root='.'):
                     for jj in range(Nj):
                         for tt in range(len(n[jj])):
                             m_items[k_coll[jj].value[tt]] += n[jj][tt]
-                    if True or [e.count for e in evidence] != m_items:
+                    if [e.count for e in evidence] != m_items:
                         logger.debug3("Evidence counts and m, n containers do not agree\n" +
                                              "data in evidence: {}\n".format([e.count for e in evidence]) +
                                              "data in m: {}\n".format(m_items) +
                                              "m: {}\n".format(m) +
                                              "n[j]: {}\n".format(n[j]) +
                                              "k_coll[j].value: {}".format(k_coll[j].value) )
+                        raise RuntimeError()
 
                     # get previous assignments
                     tprev = t_coll[j].value[i]
@@ -386,6 +392,8 @@ def execute(root='.'):
                         logger.debug3('n[{}][{}]++ -> {}'.format(j, tnext, n[j][tnext]))
                     evidence[knext].insert(data)
                     logger.debug3('')
+
+                    if exit_signal_recieved: exit_early()
                 # END Pixel loop
 
                 tpermutation = rand.permutation(numGroups(j))
@@ -422,6 +430,8 @@ def execute(root='.'):
                         evidence[kprev] = evidence_copy
                         for data in data_t:
                             evidence[knext].insert(data)
+
+                    if exit_signal_recieved: exit_early()
                 #  time.sleep(10)
                 # END group loop
             # END Image loop
@@ -433,6 +443,7 @@ def execute(root='.'):
             # write current results
             if visualize:
                 make_class_maps()
+            if exit_signal_recieved: exit_early()
 
         # log summary, generate plots, save checkpoint data
         cleanup()
