@@ -43,6 +43,7 @@ def execute(root='.'):
     default_notify         = False
     default_verbose        = 0
 
+    cleanup = None
     try:
         parser = argparse.ArgumentParser(description='Gibbs sampler for jointly segmenting vector-valued image collections',
                 formatter_class=argparse.ArgumentDefaultsHelpFormatter)
@@ -110,6 +111,7 @@ def execute(root='.'):
         if not resume:
             logger.info('loading images from {}.....'.format(datapath))
             docs, sizes, fnames, dim = fileio.loadImageSet(datapath, ftype=ftype, resize=resamplefactor)
+            if len(docs) < 1: raise RuntimeError('No images were loaded')
         Nj = len(docs)                       # number of images
         Ni = [doc.shape[0] for doc in docs]  # list of image sizes (linear)
         if visualize:

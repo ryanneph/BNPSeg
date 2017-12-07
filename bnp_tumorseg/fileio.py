@@ -8,12 +8,51 @@ from matplotlib import pyplot as plt
 import logging
 from pymedimage.misc import ensure_extension
 from pymedimage.rttypes import MaskableVolume
-
+from pymedimage.fileio.general import loadImageCollection
+from pymedimage.fileio.common_naming import gettype_BRATS17
 
 logger = logging.getLogger(__name__)
 logging.getLogger('PIL').setLevel(logging.WARNING) # suppress PIL logging
+logging.getLogger('pymedimage').setLevel(logging.WARNING) # suppress PIL logging
 
-def loadImageSet(dname, visualize=False, ftype='float32', normalize=True, resize=None):
+def loadImageSet(dname, **kwargs):
+    result = loadImageSet_natural(dname, **kwargs)
+    if result: return result
+
+    result = loadImageSet_medical(dname, **kwargs)
+    #  print(result)
+    if result: return result
+
+    raise RuntimeError('Failed to load images at "{}"'.format(dname))
+
+def loadImageSet_medical(dname, visualize=False, ftype='float32', normalize=True, resize=None):
+    """recursively walk within dname, loading each directory of images as a separate 'document' with mulitple
+    channels"""
+    ims = []
+    sizes = []
+    fnames = []
+    d = loadImageCollection(dname,
+                            exts=['.nii', '.nii.gz', '.mha'],
+                            type_order=['t1','t1ce','t2','flair'],
+                            mask_types=['seg'],
+                            multichannel=True,
+                            typegetter=gettype_BRATS17,
+                            asarray=True,
+                            resize_factor=resize)
+    dim = next(iter(d.values()))[0].shape[0]
+    for _f, _im in d.items():
+        print(os.path.join(dname, _f))
+        _im_reshaped = _im[0][:,100,:,:].reshape(dim, -1).T
+        # TODO: dynamically normalize instead of static 1024
+        _im_reshaped = _im_reshaped.astype(ftype)/1024.0
+        ims.append(_im_reshaped)
+        sizes.append(_im[0].shape[2:])
+        fnames.append(os.path.join(dname, _f))
+    logger.debug('loaded image: {}, (h,w)={}, shape={}'.format(fnames[-1], sizes[-1], ims[-1].shape))
+    if ims: return ims, sizes, fnames, dim
+    else:   return None
+
+def loadImageSet_natural(dname, visualize=False, ftype='float32', normalize=True, resize=None):
     """load a set of rgb images conatained within a single directory's top level
     Each image is loaded using PIL as an rgb image then linearized into a matrix [shape=(N,D)] containing N
     pixels in row-major (zyx) order, and D-dimensional pixel appearance features
@@ -72,7 +111,8 @@ def loadImageSet(dname, visualize=False, ftype='float32', normalize=True, resize
             sizes.append(im.size[::-1])
             fnames.append(fname)
             logger.debug('loaded image: {}, (h,w)={}, shape=({})'.format(fname, sizes[-1], arr.shape))
-    return ims, sizes, fnames, common_dim
+    if ims: return ims, sizes, fnames, common_dim
+    else:   return None
 
 def plotChannels(arr):
     fig = plt.figure(figsize=(9,3))
