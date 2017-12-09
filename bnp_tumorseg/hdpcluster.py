@@ -8,6 +8,7 @@ import math
 import pickle
 import random
 import numpy as np
+import numpy.ma as ma
 import numpy.random as rand
 import matplotlib.pyplot as plt
 if not 'DISPLAY' in os.environ:
@@ -35,7 +36,7 @@ def execute(root='.'):
     default_maxiter        = 30
     default_burnin         = 40
     default_smoothlvl      = 10
-    default_resamplefactor = 0.25
+    default_resamplefactor = 1
     default_concentration  = 1
     default_ftype          = 'float64'
     default_dataset        = 'blackwhite_sub'
@@ -50,6 +51,7 @@ def execute(root='.'):
         parser.add_argument('--verbose', '-v', action='count', default=default_verbose, help='increase verbosity level by 1 for each flag')
         parser.add_argument('--visualize', action='store_true', default=default_visualize, help='produce intermediate/final result figures')
         parser.add_argument('--notify', action='store_true', default=default_notify, help='send push notifications')
+        parser.add_argument('--showstatwarnings', action='store_true', default=not helpers.hide_stats_warnings, help='log warnings for unstable sampler values')
         parser.add_argument('--maxiter', type=int, default=default_maxiter, help='maximum sampling iterations')
         parser.add_argument('--burnin', type=int, default=default_burnin, help='number of initial samples to discard in prediction')
         parser.add_argument('--dataset', type=str, choices=[x for x in os.listdir(data_root) if os.path.isdir(os.path.join(data_root, x))],
@@ -73,6 +75,7 @@ def execute(root='.'):
         maxiter        = args.maxiter
         burnin         = args.burnin
         resume         = args.resume_from
+        helpers.hide_stats_warnings = args.showstatwarnings
 
         if resume:
             with open(resume, 'rb') as f:
@@ -108,7 +111,7 @@ def execute(root='.'):
         # Model Definition #
         #==================#
         # load data - load each image as a separate document (j)
-        if not resume:
+        if not resume :
             logger.info('loading images from {}.....'.format(datapath))
             docs, sizes, fnames, dim = fileio.loadImageSet(datapath, ftype=ftype, resize=resamplefactor)
             if len(docs) < 1: raise RuntimeError('No images were loaded')
@@ -118,7 +121,7 @@ def execute(root='.'):
             imcollection = [np.array(docs[j]).reshape((*sizes[j], dim))
                            for j in range(Nj)]
             fname = os.path.join(p_figs, '0_images')
-            fileio.saveMosaic(imcollection, fname, cmap=None, header='input images', footer='resample factor: {}'.format(resamplefactor))
+            fileio.saveMosaic(fileio.splitSlices(imcollection), fname, cmap='gray', header='input images', footer='resample factor: {}'.format(resamplefactor))
         logger.info('found {} images with dim={}'.format(len(docs), dim))
 
         # hyperparameter settings
@@ -183,6 +186,9 @@ def execute(root='.'):
                 for t in range(init_nclasses):
                     k_coll[j].value[t] = t
                 for i, data in enumerate(doc):
+                    #  if data.mask.any():
+                    #      t_coll[j].value[i] = 0
+                    #      continue
                     r = random.randrange(init_nclasses)
                     evidence[r].insert(data)
                     n[j][r] += 1
@@ -329,8 +335,9 @@ def execute(root='.'):
                 # gen. rand. permutation over elements in document
                 ipermutation = rand.permutation(Ni[j])
                 for i in ipermutation:
-                    logger.debug3('ss_iter={}, j={}, i={}'.format(ss_iter, j, i))
                     data = docs[j][i,:]
+                    #  if data.mask.any(): continue
+                    logger.debug3('ss_iter={}, j={}, i={}'.format(ss_iter, j, i))
 
                     m_items = [0]*len(m)
                     for jj in range(Nj):
@@ -338,12 +345,13 @@ def execute(root='.'):
                             m_items[k_coll[jj].value[tt]] += n[jj][tt]
                     if [e.count for e in evidence] != m_items:
                         logger.debug3("Evidence counts and m, n containers do not agree\n" +
+                                             "total data: {}\n".format(np.sum([e.count for e in evidence])) +
                                              "data in evidence: {}\n".format([e.count for e in evidence]) +
                                              "data in m: {}\n".format(m_items) +
                                              "m: {}\n".format(m) +
                                              "n[j]: {}\n".format(n[j]) +
                                              "k_coll[j].value: {}".format(k_coll[j].value) )
-                        raise RuntimeError()
+                        #  raise RuntimeError()
 
                     # get previous assignments
                     tprev = t_coll[j].value[i]
@@ -413,6 +421,7 @@ def execute(root='.'):
                     evidence_copy = evidence[kprev].copy()
                     data_t = docs[j][t_coll[j].value==t, :]
                     for data in data_t:
+                        #  if data.mask.any(): continue
                         evidence_copy.remove(data)
 
                     # compute joint marginal likelihoods for data in group tnext
@@ -431,6 +440,7 @@ def execute(root='.'):
                         k_coll[j].value[t] = knext
                         evidence[kprev] = evidence_copy
                         for data in data_t:
+                            #  if data.mask.any(): continue
                             evidence[knext].insert(data)
 
                     if exit_signal_recieved: exit_early()

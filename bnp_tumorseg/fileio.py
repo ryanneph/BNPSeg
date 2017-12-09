@@ -3,6 +3,7 @@ import os
 import numbers
 import math
 import numpy as np
+import numpy.ma as ma
 from PIL import Image
 from matplotlib import pyplot as plt
 import logging
@@ -10,17 +11,25 @@ from pymedimage.misc import ensure_extension
 from pymedimage.rttypes import MaskableVolume
 from pymedimage.fileio.general import loadImageCollection
 from pymedimage.fileio.common_naming import gettype_BRATS17
+from pymedimage.visualgui import multi_slice_viewer as view3d
+import re
+
+def gettype_rtfeature(fname):
+    m = re.search(r'feature=(\w+)_args', fname)
+    if m is not None: return m.group(1)
+    else: return None
 
 logger = logging.getLogger(__name__)
 logging.getLogger('PIL').setLevel(logging.WARNING) # suppress PIL logging
-logging.getLogger('pymedimage').setLevel(logging.WARNING) # suppress PIL logging
+logging.getLogger('pymedimage').setLevel(logging.DEBUG)
 
 def loadImageSet(dname, **kwargs):
-    result = loadImageSet_natural(dname, **kwargs)
-    if result: return result
+    try:
+        result = loadImageSet_natural(dname, **kwargs)
+        if result: return result
+    except: pass
 
     result = loadImageSet_medical(dname, **kwargs)
-    #  print(result)
     if result: return result
 
     raise RuntimeError('Failed to load images at "{}"'.format(dname))
@@ -32,23 +41,30 @@ def loadImageSet_medical(dname, visualize=False, ftype='float32', normalize=True
     sizes = []
     fnames = []
     d = loadImageCollection(dname,
-                            exts=['.nii', '.nii.gz', '.mha'],
-                            type_order=['t1','t1ce','t2','flair'],
-                            mask_types=['seg'],
+                            exts=['.nii', '.nii.gz', '.mha', '.h5'],
+                            #  type_order=['t1','t1ce','t2','flair'],
+                            #  type_order=['fo_energy', 'fo_entropy', 'fo_kurtosis', 'fo_rms', 'fo_stddev',
+                            #              'fo_uniformity','fo_variance', 'glcm_clustertendency_min',
+                            #              'glcm_contrast_min'],
                             multichannel=True,
-                            typegetter=gettype_BRATS17,
+                            typegetter=gettype_rtfeature,
+                            #  typegetter=gettype_BRATS17,
                             asarray=True,
                             resize_factor=resize)
-    dim = next(iter(d.values()))[0].shape[0]
+    dim = next(iter(d.values())).shape[0]
     for _f, _im in d.items():
-        print(os.path.join(dname, _f))
-        _im_reshaped = _im[0][:,100,:,:].reshape(dim, -1).T
+        startslice = 0
+        nslices = _im.shape[1]
+        _im_reshaped = _im[:,startslice:startslice+nslices,:,:].reshape(dim, nslices, -1).T
         # TODO: dynamically normalize instead of static 1024
-        _im_reshaped = _im_reshaped.astype(ftype)/1024.0
-        ims.append(_im_reshaped)
-        sizes.append(_im[0].shape[2:])
-        fnames.append(os.path.join(dname, _f))
-    logger.debug('loaded image: {}, (h,w)={}, shape={}'.format(fnames[-1], sizes[-1], ims[-1].shape))
+        _im_normalized = _im_reshaped.astype(ftype)/1024.0
+        for sl in range(nslices):
+            #  _im_masked = ma.masked_less_equal(_im_normalized, 0)
+            #  view3d(_im_normalized[:,0].reshape((1, *_im.shape[2:])))
+            ims.append(_im_normalized[:, sl, :])
+            sizes.append(_im.shape[2:])
+            fnames.append(os.path.join(dname, _f+str(sl+startslice)))
+    logger.debug('loaded {} slices from image: {}, (h,w)={}, shape={}'.format(nslices, fnames[-1], sizes[-1], ims[-1].shape))
     if ims: return ims, sizes, fnames, dim
     else:   return None
 
@@ -125,44 +141,81 @@ def plotChannels(arr):
         ax.set_title(titles[i])
     return fig
 
-def saveMosaic(collection, fname, figsize=(10,10), cmap="Set3", header=None, footer=None):
-    if cmap is None and collection[0].shape[-1] == 1:
-        cmap="Greys"
+def splitSlices(collection):
+    """if data is multichannel, split each channel into separate slice and package into a list for each item
+    in the collection. does not support multichannel volumetric data
 
-    # plotting parameters
-    spacing = 0.01
-    margin  = 0.025
-    headerheight = 0.04 * int(bool(header))
-    footerheight = 0.04 * int(bool(footer))
+    Returns: [images...] for single channel (2d) data, or [ [slices], [slices]... ] for multichannel images"""
+    newcollection = []
+    for c in collection:
+        slices = []
+        if c.ndim == 3:
+            for s in range(c.shape[-1]):
+                slices.append(np.squeeze(c[:,:,s]))
+        elif c.ndim > 3: raise RuntimeError('expected ndim <=3, not {}'.format(c.ndim))
+        else: slices.append(np.squeeze(c))
+        newcollection.append(slices)
+    return newcollection
 
-    # add header/footer text
-    fig = plt.figure(figsize=figsize)
-    if header is not None:
-        fig.text(0.5, 1-(margin+0.5*headerheight), str(header),
-                 horizontalalignment='center', verticalalignment='bottom', transform=fig.transFigure)
-    if footer is not None:
-        fig.text(0.5, (margin+0.5*footerheight), str(footer),
-                 horizontalalignment='center', verticalalignment='top', transform=fig.transFigure)
+def saveMosaic(slices, fname, figsize=(10,10), cmap="Set3", header=None, footer=None):
+    """save a tiling of each image in the collection. if each item in the collection is of ndim>2 then
+    save a tiling of the channels in each item to a separate mosaic instead
 
-    # construct mosaic
-    Nj = len(collection)
-    nrow = math.ceil(math.sqrt(Nj))
-    ncol = nrow - (1 if nrow*(nrow-1)>=Nj else 0)
-    wper = (1-2*margin-(ncol-1)*spacing)/ncol
-    hper = (1-2*margin-headerheight-footerheight-(nrow-1)*spacing)/nrow
-    for j in range(Nj):
-        yy = math.floor(j/ncol)
-        xx = j % ncol
-        ax = fig.add_axes([xx*wper+xx*spacing+margin,
-                           1-(yy*hper+yy*spacing+margin+headerheight)-hper,
-                           wper, hper])
-        ax.imshow(np.squeeze(collection[j]), cmap=cmap, interpolation=None)
-        #  ax.set_axis_off()
-        ax.axes.xaxis.set_visible(False)
-        ax.axes.yaxis.set_visible(False)
+    collection is either [ [slice1, slice2...], [slice1, slice2...] ] or [slice1, slice2...] (see splitSlices())
+    """
+    plotslices = []
+    fnames = []
+    for i, s in enumerate(slices):
+        if not isinstance(s, list):
+            plotslices.append(slices)
+            fnames.append(fname)
+            break
+        else:
+            base, ext = os.path.splitext(fname)
+            for n in range(len(s)):
+                f = '{}_im{}_sl{}.{}'.format(base, i, n, ext)
+                fnames.append(f)
+            plotslices.append(s)
 
-    fig.savefig(fname)
-    plt.close(fig)
+    for c, _f in zip(plotslices, fnames):
+        for slice in c:
+            if slice.ndim > 2: raise RuntimeError('dimensionality of each item is expected to be 2, not {}'.format(slice.ndim))
+        if cmap is None and c[0].ndim <= 2: cmap="gray"
+
+        # plotting parameters
+        spacing = 0.01
+        margin  = 0.025
+        headerheight = 0.04 * int(bool(header))
+        footerheight = 0.04 * int(bool(footer))
+
+        # add header/footer text
+        fig = plt.figure(figsize=figsize)
+        if header is not None:
+            fig.text(0.5, 1-(margin+0.5*headerheight), str(header),
+                     horizontalalignment='center', verticalalignment='bottom', transform=fig.transFigure)
+        if footer is not None:
+            fig.text(0.5, (margin+0.5*footerheight), str(footer),
+                     horizontalalignment='center', verticalalignment='top', transform=fig.transFigure)
+
+        # construct mosaic
+        Nj = len(c)
+        nrow = math.ceil(math.sqrt(Nj))
+        ncol = nrow - (1 if nrow*(nrow-1)>=Nj else 0)
+        wper = (1-2*margin-(ncol-1)*spacing)/ncol
+        hper = (1-2*margin-headerheight-footerheight-(nrow-1)*spacing)/nrow
+        for j in range(Nj):
+            yy = math.floor(j/ncol)
+            xx = j % ncol
+            ax = fig.add_axes([xx*wper+xx*spacing+margin,
+                               1-(yy*hper+yy*spacing+margin+headerheight)-hper,
+                               wper, hper])
+            ax.imshow(c[j], cmap=cmap, interpolation=None)
+            #  ax.set_axis_off()
+            ax.axes.xaxis.set_visible(False)
+            ax.axes.yaxis.set_visible(False)
+
+        fig.savefig(_f)
+        plt.close(fig)
 
 def saveImage(array, fname, mode='L', resize=None, cmap='Set3'):
     array = np.squeeze(array)

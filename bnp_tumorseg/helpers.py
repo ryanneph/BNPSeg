@@ -7,6 +7,7 @@ from . import loggers
 from .wrappers import exp, log, gammaln
 
 logger = logging.getLogger(__name__)
+hide_stats_warnings = True
 
 def sampleCatDist(wts):
     """Draw 0-based index from categorical distribution"""
@@ -15,10 +16,10 @@ def sampleCatDist(wts):
     if wtsum<=0 or wtsum==np.NaN or wtsum==np.Inf:
         # usually occurs becuase margL is 0 for all classes
         # TODO: should set to [0, ..., 0, 1] indicating guaranteed new class
-        logger.warning("unstable categorical weights vector with sum(wts)={}.".format(wtsum))
+        if not hide_stats_warnings: logger.warning("unstable categorical weights vector with sum(wts)={}.".format(wtsum))
         #  raise RuntimeError
         wts = np.ones_like(wts) / len(wts)
-        logger.warning("Setting uniform weights: {}".format(wts))
+        if not hide_stats_warnings: logger.warning("Setting uniform weights: {}".format(wts))
     else:
         # normalize
         wts = wts / np.sum(wts)
@@ -57,7 +58,7 @@ def likelihoodTnew(beta, margL, margL_prior):
     val += beta[-1] * margL_prior
     val /= np.sum(beta)
     if __debug__ and not 0<=val<=1 and logger.getEffectiveLevel() <= loggers.DEBUG3:
-        logger.warning('invalid likelihood encountered: {}'.format(val))
+        if not hide_stats_warnings: logger.warning('invalid likelihood encountered: {}'.format(val))
     return val
 
 def sampleT(n_j, k_j, beta, a0, margL, margL_prior, mrf_args=None):

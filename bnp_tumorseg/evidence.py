@@ -1,5 +1,6 @@
 from math import pi, sqrt
 import numpy as np
+import numpy.ma as ma
 from numpy.linalg import cholesky, solve
 from copy import copy, deepcopy
 import choldate
@@ -110,12 +111,16 @@ class ModelEvidenceNIW():
         return deepcopy(self)
 
     def insert(self, x):
+        if ma.getmask(x).any():
+            raise ValueError('attempt to insert masked data from evidence')
         self._count += 1
         self._insert_sum(x)
         #  self._insert_outprod(x)
         self._insert_cholcov(x)
 
     def remove(self, x):
+        if ma.getmask(x).any():
+            raise ValueError('attempt to remove masked data from evidence')
         if self._count <=0:
             raise RuntimeError('{} has no data items to remove'.format(self.__class__.__name__))
         self._count -= 1
