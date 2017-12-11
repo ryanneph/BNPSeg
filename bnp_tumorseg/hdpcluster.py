@@ -19,6 +19,7 @@ from . import fileio, helpers, loggers
 from .trace import Trace
 from .evidence import ModelEvidenceNIW
 from .notifications import pushNotification
+from pymedimage.visualgui import multi_slice_viewer as view3d
 
 # setup logger
 logger = logging.getLogger()
@@ -80,7 +81,7 @@ def execute(root='.'):
         if resume:
             with open(resume, 'rb') as f:
                 dataset, ss_iter, hist_numclasses, hist_numclasses_active,\
-                        docs, sizes, fnames, dim, t_coll, k_coll, evidence, m, n = pickle.load(f)
+                        docs, masks, sizes, fnames, dim, t_coll, k_coll, evidence, m, n = pickle.load(f)
             ss_iter -= 1
             for trace in t_coll + k_coll:
                 trace.burnin = burnin
@@ -105,32 +106,39 @@ def execute(root='.'):
         # semi-permanent settings
         rand.seed(21) #numpy
         random.seed(21) #python
-        init_nclasses = 3 # randomly init items into # groups per image and # global groups
+        init_nclasses = 6 # randomly init items into # groups per image and # global groups
 
         #==================#
         # Model Definition #
         #==================#
         # load data - load each image as a separate document (j)
-        if not resume :
+        if not resume:
             logger.info('loading images from {}.....'.format(datapath))
-            docs, sizes, fnames, dim = fileio.loadImageSet(datapath, ftype=ftype, resize=resamplefactor)
-            if len(docs) < 1: raise RuntimeError('No images were loaded')
+            _docs, _masks, sizes, fnames, dim = fileio.loadImageSet(datapath, ftype=ftype, resize=resamplefactor)
+            if len(_docs) < 1: raise RuntimeError('No images were loaded')
+            docs, masks = fileio.mask(_docs, masks=_masks, maskval=1e-1)
+            docs = fileio.normalize(docs)
         Nj = len(docs)                       # number of images
         Ni = [doc.shape[0] for doc in docs]  # list of image sizes (linear)
         if visualize:
-            imcollection = [np.array(docs[j]).reshape((*sizes[j], dim))
+            imcollection = [fileio.unmask(docs[j], masks[j], fill_value=0, channels=docs[j].shape[-1]).reshape((*sizes[j], dim))
+                           for j in range(Nj)]
+            maskcollection = [masks[j].reshape((*sizes[j]))*255
                            for j in range(Nj)]
             fname = os.path.join(p_figs, '0_images')
             fileio.saveMosaic(fileio.splitSlices(imcollection), fname, cmap='gray', header='input images', footer='resample factor: {}'.format(resamplefactor))
+            if masks is not None:
+                fname = os.path.join(p_figs, '0_masks')
+                fileio.saveMosaic(fileio.splitSlices(maskcollection), fname, cmap='gray', header='input images', footer='resample factor: {}'.format(resamplefactor))
         logger.info('found {} images with dim={}'.format(len(docs), dim))
 
         # hyperparameter settings
-        hp_gamma  = concentration    # global DP concentration param (higher encourages more global classes to be created)
-        hp_a0     = hp_gamma         # document-wise DP concentration param (higher encourages more document groups to be created)
-        hp_n      = dim*2                # Wishart Deg. of Freedom (must be > d-1)
-        hp_k      = 2                 # mean prior - covariance scaling param
-        hp_mu     = np.ones((dim,))      # mean prior - location param (d-rank vector)
-        hp_lbdinv = hp_n * 2*np.eye(dim) # mean prior - covariance matrix (dxd-rank matrix)
+        hp_gamma  = 24    # global DP concentration param (higher encourages more global classes to be created)
+        hp_a0     = 15         # document-wise DP concentration param (higher encourages more document groups to be created)
+        hp_n      = dim                # Wishart Deg. of Freedom (must be > d-1)
+        hp_k      = 1                  # mean prior - covariance scaling param
+        hp_mu     = 0*np.ones((dim,))      # mean prior - location param (d-rank vector)
+        hp_lbdinv = hp_n * 0.01*np.eye(dim) # mean prior - covariance matrix (dxd-rank matrix)
         # MRF params
         mrf_lbd   = smoothlvl            # strength of spatial group label smoothness
 
@@ -245,8 +253,8 @@ def execute(root='.'):
 
         def saveImages():
             """save t, k-map modes to image files with various visual representations"""
-            for tmap, kmap, size, fname in zip(t_coll, k_coll, sizes, fnames):
-                tmap = tmap.mode(burn=(ss_iter>burnin)).reshape(size)
+            for tmap, kmap, mask, size, fname in zip(t_coll, k_coll, masks, sizes, fnames):
+                tmap = fileio.unmask(tmap.mode(burn=(ss_iter>burnin)), mask, fill_value=-1, channels=1).reshape(size)
                 kmap = helpers.constructfullKMap(tmap, kmap.mode(burn=(ss_iter>burnin)))
                 base, ext = os.path.splitext(os.path.basename(fname))
                 fileio.saveImage(tmap, os.path.join(p_figs_final, base+'_t'+ext), mode='RGB', cmap='Set1', resize=1/resamplefactor)
@@ -254,27 +262,27 @@ def execute(root='.'):
                 fileio.saveImage(kmap, os.path.join(p_figs_final, base+'_k_gray'+ext), mode='L', resize=1/resamplefactor)
 
         def make_class_maps():
-            tcollection = [np.array(t_coll[j].mode(burn=(ss_iter>burnin))).reshape(sizes[j])
+            tcollection = [fileio.unmask(t_coll[j].mode(burn=(ss_iter>burnin)), masks[j], fill_value=-1, channels=1).reshape(sizes[j])
                            for j in range(Nj)]
             fname = os.path.join(p_figs, 'iter_{:04}_t'.format(ss_iter))
-            fileio.saveMosaic(tcollection, fname, header='region labels', footer='iter: {}'.format(ss_iter), cmap='Set1')
+            fileio.saveMosaic(tcollection, fname, header='region labels', footer='iter: {}'.format(ss_iter), cmap='Set1', vmin=-1)
 
             kcollection = [helpers.constructfullKMap(tcollection[j], k_coll[j].mode(burn=(ss_iter>burnin)))
                            for j in range(Nj)]
             fname = os.path.join(p_figs, 'iter_{:04}_k'.format(ss_iter))
             fileio.saveMosaic(kcollection, fname, header='class labels', footer='iter: {:4g}, # active classes: {}'.format(
-                ss_iter, numActiveClasses()), cmap="Set3")
+                ss_iter, numActiveClasses()), cmap="Set3", vmin=-1)
 
             # DEBUG
             if verbose >= 3:
-                tcollection = [np.array(t_coll[j].value).reshape(sizes[j]) for j in range(Nj)]
+                tcollection = [fileio.unmask(t_coll[j].value, masks[j], fill_value=-1, channels=1).reshape(sizes[j]) for j in range(Nj)]
                 fname = os.path.join(p_figs, 'iter_{:04}_t_value'.format(ss_iter))
-                fileio.saveMosaic(tcollection, fname, header='region labels', footer='iter: {}'.format(ss_iter), cmap='Set1')
+                fileio.saveMosaic(tcollection, fname, header='region labels', footer='iter: {}'.format(ss_iter), cmap='Set1', vmin=-1)
 
                 kcollection = [helpers.constructfullKMap(tcollection[j], k_coll[j].value) for j in range(Nj)]
                 fname = os.path.join(p_figs, 'iter_{:04}_k_value'.format(ss_iter))
                 fileio.saveMosaic(kcollection, fname, header='class labels', footer='iter: {:4g}, # active classes: {}'.format(
-                    ss_iter, numActiveClasses()), cmap="Set3")
+                    ss_iter, numActiveClasses()), cmap="Set3", vmin=-1)
 
         def cleanup(fname="final_data.pickle"):
             """report final groups and classes"""
@@ -298,7 +306,7 @@ def execute(root='.'):
                 fname = os.path.join(p_blobs, fname)
                 with open(fname, 'wb') as f:
                     pickle.dump([dataset, ss_iter, hist_numclasses, hist_numclasses_active,\
-                                 docs, sizes, fnames, dim, t_coll, k_coll, evidence, m, n], f)
+                                 docs, masks, sizes, fnames, dim, t_coll, k_coll, evidence, m, n], f)
                     logger.info('data saved to "{}"'.format(fname))
             except Exception as e:
                 logger.error('failed to save checkpoint data\n{}'.format(e))

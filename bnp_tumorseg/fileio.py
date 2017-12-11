@@ -55,17 +55,14 @@ def loadImageSet_medical(dname, visualize=False, ftype='float32', normalize=True
     for _f, _im in d.items():
         startslice = 0
         nslices = _im.shape[1]
-        _im_reshaped = _im[:,startslice:startslice+nslices,:,:].reshape(dim, nslices, -1).T
-        # TODO: dynamically normalize instead of static 1024
-        _im_normalized = _im_reshaped.astype(ftype)/1024.0
+        _im_reshaped = _im[:,startslice:startslice+nslices,:,:].reshape(dim, nslices, -1).T.astype(ftype)
         for sl in range(nslices):
-            #  _im_masked = ma.masked_less_equal(_im_normalized, 0)
-            #  view3d(_im_normalized[:,0].reshape((1, *_im.shape[2:])))
-            ims.append(_im_normalized[:, sl, :])
+            ims.append(_im_reshaped[:, sl, :])
             sizes.append(_im.shape[2:])
             fnames.append(os.path.join(dname, _f+str(sl+startslice)))
+    masks = None # TODO: implement masking
     logger.debug('loaded {} slices from image: {}, (h,w)={}, shape={}'.format(nslices, fnames[-1], sizes[-1], ims[-1].shape))
-    if ims: return ims, sizes, fnames, dim
+    if ims: return ims, masks, sizes, fnames, dim
     else:   return None
 
 def loadImageSet_natural(dname, visualize=False, ftype='float32', normalize=True, resize=None):
@@ -127,8 +124,64 @@ def loadImageSet_natural(dname, visualize=False, ftype='float32', normalize=True
             sizes.append(im.size[::-1])
             fnames.append(fname)
             logger.debug('loaded image: {}, (h,w)={}, shape=({})'.format(fname, sizes[-1], arr.shape))
-    if ims: return ims, sizes, fnames, common_dim
+    if ims: return ims, None, sizes, fnames, common_dim
     else:   return None
+
+def mask(collection, masks=None, maskval=None):
+    """mask values by pruning out values according to maskcollection or equality to maskval"""
+    if masks is not None:
+        maskval = None
+    elif maskval is not None:
+        masks = []
+        for im in collection:
+            masks.append(np.where(im[:,0]>maskval, 1, 0))
+    else: return (collection, [None]*len(collection))
+
+    masked = []
+    for im, mask in zip(collection, masks):
+        masked.append( np.atleast_1d( im[mask!=0, :] ) )
+    return masked, masks
+
+def unmask(collection, masks=None, channels=1, fill_value=0):
+    """use masks to expand pruned vectors back into properly shaped dense representations"""
+    if masks is None: return collection
+    if not isinstance(collection, list): collection = [collection]
+    if not isinstance(masks, list): masks = [masks]
+    full = []
+
+    for vec, mask in zip(collection, masks):
+        _im = fill_value*np.ones((*mask.shape, channels), dtype=float)
+        _im[np.nonzero(mask), :] = vec
+        full.append(np.atleast_1d(_im))
+    if len(full) == 1: return full[0]
+    else: return full
+
+def normalize(collection):
+    """normalize a set of arrays by scaling the sample max to 1 and sample min to 0 for each channel
+    independently
+
+    Args:
+        collection (list): list of (m, d) or (m, 1) arrays where m is # pixels in image, d is # channels
+    """
+    if isinstance(collection, list) and len(collection) <= 0:
+        raise RuntimeError('Collection provided was empty')
+    if not isinstance(collection, list): collection = [collection]
+    dim = collection[0].shape[-1]
+    for d in range(dim):
+        smin = 9999.0
+        smax = -9999.0
+        for im in collection:
+            _min = np.min(im[:,d])
+            _max = np.max(im[:,d])
+            if _min < smin: smin = _min
+            if _max > smax: smax = _max
+        logger.debug3('channel #{}: min={}, max={}'.format(d, smin, smax))
+
+        for im in collection:
+            im[:,d] = (im[:,d] - smin) / (smax-smin)
+    if len(collection) == 1: return collection[0]
+    else: return collection
+
 
 def plotChannels(arr):
     fig = plt.figure(figsize=(9,3))
@@ -157,7 +210,7 @@ def splitSlices(collection):
         newcollection.append(slices)
     return newcollection
 
-def saveMosaic(slices, fname, figsize=(10,10), cmap="Set3", header=None, footer=None):
+def saveMosaic(slices, fname, figsize=(10,10), cmap="Set3", header=None, footer=None, **kwargs):
     """save a tiling of each image in the collection. if each item in the collection is of ndim>2 then
     save a tiling of the channels in each item to a separate mosaic instead
 
@@ -209,7 +262,7 @@ def saveMosaic(slices, fname, figsize=(10,10), cmap="Set3", header=None, footer=
             ax = fig.add_axes([xx*wper+xx*spacing+margin,
                                1-(yy*hper+yy*spacing+margin+headerheight)-hper,
                                wper, hper])
-            ax.imshow(c[j], cmap=cmap, interpolation=None)
+            ax.imshow(c[j], cmap=cmap, interpolation=None, **kwargs)
             #  ax.set_axis_off()
             ax.axes.xaxis.set_visible(False)
             ax.axes.yaxis.set_visible(False)
