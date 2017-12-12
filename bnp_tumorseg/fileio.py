@@ -150,8 +150,8 @@ def unmask(collection, masks=None, channels=1, fill_value=0):
     full = []
 
     for vec, mask in zip(collection, masks):
-        _im = fill_value*np.ones((*mask.shape, channels), dtype=float)
-        _im[np.nonzero(mask), :] = vec
+        _im = np.squeeze(fill_value*np.ones((*mask.shape, channels), dtype=float))
+        _im[np.nonzero(mask)] = np.squeeze(vec)
         full.append(np.atleast_1d(_im))
     if len(full) == 1: return full[0]
     else: return full
@@ -210,7 +210,37 @@ def splitSlices(collection):
         newcollection.append(slices)
     return newcollection
 
-def saveMosaic(slices, fname, figsize=(10,10), cmap="Set3", header=None, footer=None, **kwargs):
+def remapValues(collection, return_range=False):
+    """remap unique values in the collection of images to a contiguous set of integers"""
+    # map values to shared contiguous integer identity space
+    unq = set()
+    mapped_collection = []
+    for im in collection:
+        unq.update(np.unique(im).tolist())
+        mapped_collection.append(np.copy(im))
+    unq = sorted(unq)
+    #  print('len: ', len(unq), 'vals: ', unq)
+    valmap = {}
+    newval_counter = -1
+    negval_counter = 0
+    for rawval in unq:
+        if rawval < 0:
+            negval_counter -= 1
+            valmap[rawval] = negval_counter
+        else:
+            newval_counter += 1
+            valmap[rawval] = newval_counter
+    # remap values
+    for im in mapped_collection:
+        for old, new in valmap.items():
+            im[im==old] = new
+
+    if return_range:
+        return mapped_collection, negval_counter, newval_counter
+    else:
+        return mapped_collection
+
+def saveMosaic(slices, fname, figsize=(10,10), header=None, footer=None, cmap=None, remap_values=False, colorbar=False, **kwargs):
     """save a tiling of each image in the collection. if each item in the collection is of ndim>2 then
     save a tiling of the channels in each item to a separate mosaic instead
 
@@ -250,6 +280,11 @@ def saveMosaic(slices, fname, figsize=(10,10), cmap="Set3", header=None, footer=
             fig.text(0.5, (margin+0.5*footerheight), str(footer),
                      horizontalalignment='center', verticalalignment='top', transform=fig.transFigure)
 
+        if remap_values:
+            c, vmin, vmax = remapValues(c, return_range=True)
+            kwargs['vmin'] = vmin
+            kwargs['vmax'] = vmax
+
         # construct mosaic
         Nj = len(c)
         nrow = math.ceil(math.sqrt(Nj))
@@ -262,7 +297,8 @@ def saveMosaic(slices, fname, figsize=(10,10), cmap="Set3", header=None, footer=
             ax = fig.add_axes([xx*wper+xx*spacing+margin,
                                1-(yy*hper+yy*spacing+margin+headerheight)-hper,
                                wper, hper])
-            ax.imshow(c[j], cmap=cmap, interpolation=None, **kwargs)
+            _a = ax.imshow(c[j], cmap=cmap, interpolation=None, **kwargs)
+            if colorbar: plt.colorbar(_a, ax=ax)
             #  ax.set_axis_off()
             ax.axes.xaxis.set_visible(False)
             ax.axes.yaxis.set_visible(False)

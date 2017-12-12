@@ -8,6 +8,7 @@ import math
 import pickle
 import random
 import numpy as np
+import numpy.linalg as linalg
 import numpy.ma as ma
 import numpy.random as rand
 import matplotlib.pyplot as plt
@@ -36,7 +37,7 @@ def execute(root='.'):
     # arg defaults
     default_maxiter        = 30
     default_burnin         = 40
-    default_smoothlvl      = 10
+    default_smoothlvl      = 0
     default_resamplefactor = 1
     default_concentration  = 1
     default_ftype          = 'float64'
@@ -80,12 +81,16 @@ def execute(root='.'):
 
         if resume:
             with open(resume, 'rb') as f:
-                dataset, ss_iter, hist_numclasses, hist_numclasses_active,\
-                        docs, masks, sizes, fnames, dim, t_coll, k_coll, evidence, m, n = pickle.load(f)
-            ss_iter -= 1
-            for trace in t_coll + k_coll:
-                trace.burnin = burnin
-            logger.info('resuming at iter {} from "{}" data in "{}"'.format(ss_iter, dataset, resume))
+                try:
+                    dataset, ss_iter, hist_numclasses, hist_numclasses_active,\
+                            docs, masks, sizes, fnames, dim, t_coll, k_coll, evidence, m, n = pickle.load(f)
+                    ss_iter -= 1
+                    for trace in t_coll + k_coll:
+                        trace.burnin = burnin
+                    logger.info('resuming at iter {} from "{}" data in "{}"'.format(ss_iter, dataset, resume))
+                except:
+                    logger.warning('Failed to resume from "{}", restarting instead'.format(resume))
+                    resume = None
 
         # make output directories
         p_figs  = os.path.join(figs_dir, dataset)
@@ -133,12 +138,14 @@ def execute(root='.'):
         logger.info('found {} images with dim={}'.format(len(docs), dim))
 
         # hyperparameter settings
-        hp_gamma  = 24    # global DP concentration param (higher encourages more global classes to be created)
-        hp_a0     = 15         # document-wise DP concentration param (higher encourages more document groups to be created)
+        hp_gamma  = concentration      # global DP concentration param (higher encourages more global classes to be created)
+        hp_a0     = concentration      # document-wise DP concentration param (higher encourages more document groups to be created)
         hp_n      = dim                # Wishart Deg. of Freedom (must be > d-1)
         hp_k      = 1                  # mean prior - covariance scaling param
-        hp_mu     = 0*np.ones((dim,))      # mean prior - location param (d-rank vector)
-        hp_lbdinv = hp_n * 0.01*np.eye(dim) # mean prior - covariance matrix (dxd-rank matrix)
+        hp_mu     = np.average([np.mean(x, axis=0) for x in docs])      # mean prior - location param (d-rank vector)
+        # mean prior - covariance matrix (dxd-rank matrix)
+        hp_lbdinv = linalg.norm(np.concatenate([doc-hp_mu for doc in docs]), axis=0)**2 \
+                  / np.sum(doc.shape[0] for doc in docs) * np.eye(dim)
         # MRF params
         mrf_lbd   = smoothlvl            # strength of spatial group label smoothness
 
@@ -194,9 +201,6 @@ def execute(root='.'):
                 for t in range(init_nclasses):
                     k_coll[j].value[t] = t
                 for i, data in enumerate(doc):
-                    #  if data.mask.any():
-                    #      t_coll[j].value[i] = 0
-                    #      continue
                     r = random.randrange(init_nclasses)
                     evidence[r].insert(data)
                     n[j][r] += 1
@@ -253,36 +257,40 @@ def execute(root='.'):
 
         def saveImages():
             """save t, k-map modes to image files with various visual representations"""
-            for tmap, kmap, mask, size, fname in zip(t_coll, k_coll, masks, sizes, fnames):
-                tmap = fileio.unmask(tmap.mode(burn=(ss_iter>burnin)), mask, fill_value=-1, channels=1).reshape(size)
-                kmap = helpers.constructfullKMap(tmap, kmap.mode(burn=(ss_iter>burnin)))
+            tcollection = [fileio.unmask(t_coll[j].mode(burn=(ss_iter>burnin)), masks[j], fill_value=-1, channels=1).reshape(sizes[j])
+                           for j in range(Nj)]
+            kcollection = [helpers.constructfullKMap(tcollection[j], k_coll[j].mode(burn=(ss_iter>burnin)))
+                           for j in range(Nj)]
+            tremap = fileio.remapValues(tcollection)
+            kremap = fileio.remapValues(kcollection)
+            for tmap, kmap, mask, size, fname in zip(tremap, kremap, masks, sizes, fnames):
                 base, ext = os.path.splitext(os.path.basename(fname))
-                fileio.saveImage(tmap, os.path.join(p_figs_final, base+'_t'+ext), mode='RGB', cmap='Set1', resize=1/resamplefactor)
-                fileio.saveImage(kmap, os.path.join(p_figs_final, base+'_k'+ext), mode='RGB', cmap='Set3', resize=1/resamplefactor)
+                fileio.saveImage(tmap, os.path.join(p_figs_final, base+'_t'+ext), mode='RGB', cmap='tab20b', resize=1/resamplefactor)
+                fileio.saveImage(kmap, os.path.join(p_figs_final, base+'_k'+ext), mode='RGB', cmap='tab20', resize=1/resamplefactor)
                 fileio.saveImage(kmap, os.path.join(p_figs_final, base+'_k_gray'+ext), mode='L', resize=1/resamplefactor)
 
         def make_class_maps():
             tcollection = [fileio.unmask(t_coll[j].mode(burn=(ss_iter>burnin)), masks[j], fill_value=-1, channels=1).reshape(sizes[j])
                            for j in range(Nj)]
             fname = os.path.join(p_figs, 'iter_{:04}_t'.format(ss_iter))
-            fileio.saveMosaic(tcollection, fname, header='region labels', footer='iter: {}'.format(ss_iter), cmap='Set1', vmin=-1)
+            fileio.saveMosaic(tcollection, fname, header='region labels', footer='iter: {}'.format(ss_iter), cmap="tab20b", colorbar=True, remap_values=True)
 
             kcollection = [helpers.constructfullKMap(tcollection[j], k_coll[j].mode(burn=(ss_iter>burnin)))
                            for j in range(Nj)]
             fname = os.path.join(p_figs, 'iter_{:04}_k'.format(ss_iter))
             fileio.saveMosaic(kcollection, fname, header='class labels', footer='iter: {:4g}, # active classes: {}'.format(
-                ss_iter, numActiveClasses()), cmap="Set3", vmin=-1)
+                ss_iter, numActiveClasses()), cmap="tab20", colorbar=True, remap_values=True)
 
             # DEBUG
             if verbose >= 3:
                 tcollection = [fileio.unmask(t_coll[j].value, masks[j], fill_value=-1, channels=1).reshape(sizes[j]) for j in range(Nj)]
                 fname = os.path.join(p_figs, 'iter_{:04}_t_value'.format(ss_iter))
-                fileio.saveMosaic(tcollection, fname, header='region labels', footer='iter: {}'.format(ss_iter), cmap='Set1', vmin=-1)
+                fileio.saveMosaic(tcollection, fname, header='region labels', footer='iter: {}'.format(ss_iter), cmap="tab20b", colorbar=True, remap_values=True)
 
                 kcollection = [helpers.constructfullKMap(tcollection[j], k_coll[j].value) for j in range(Nj)]
                 fname = os.path.join(p_figs, 'iter_{:04}_k_value'.format(ss_iter))
                 fileio.saveMosaic(kcollection, fname, header='class labels', footer='iter: {:4g}, # active classes: {}'.format(
-                    ss_iter, numActiveClasses()), cmap="Set3", vmin=-1)
+                    ss_iter, numActiveClasses()), cmap="tab20", colorbar=True, remap_values=True)
 
         def cleanup(fname="final_data.pickle"):
             """report final groups and classes"""
