@@ -25,11 +25,12 @@ from pymedimage.visualgui import multi_slice_viewer as view3d
 # setup logger
 logger = logging.getLogger()
 
-def execute(root='.'):
+def execute(root='.', data_root=None):
     global logger
 
     # setup directory structure
-    data_root = os.path.join(root, 'test_files/')
+    if data_root is None:
+        data_root = os.path.join(root, 'test_files/')
     figs_dir  = os.path.join(root, 'figures/')
     logs_dir  = os.path.join(root, 'logs/')
     blobs_dir = os.path.join(root, 'blobs/')
@@ -38,12 +39,13 @@ def execute(root='.'):
     default_maxiter        = 30
     default_burnin         = 40
     default_smoothlvl      = 0
+    default_maskval        = None
     default_resamplefactor = 1
     default_concentration  = 1
     default_ftype          = 'float64'
     default_dataset        = 'blackwhite_sub'
     default_visualize      = True
-    default_notify         = False
+    notify                 = False
     default_verbose        = 0
 
     cleanup = None
@@ -52,15 +54,15 @@ def execute(root='.'):
                 formatter_class=argparse.ArgumentDefaultsHelpFormatter)
         parser.add_argument('--verbose', '-v', action='count', default=default_verbose, help='increase verbosity level by 1 for each flag')
         parser.add_argument('--visualize', action='store_true', default=default_visualize, help='produce intermediate/final result figures')
-        parser.add_argument('--notify', action='store_true', default=default_notify, help='send push notifications')
-        parser.add_argument('--showstatwarnings', action='store_true', default=not helpers.hide_stats_warnings, help='log warnings for unstable sampler values')
+        parser.add_argument('--notify', action='store_true', default=notify, help='send push notifications')
         parser.add_argument('--maxiter', type=int, default=default_maxiter, help='maximum sampling iterations')
         parser.add_argument('--burnin', type=int, default=default_burnin, help='number of initial samples to discard in prediction')
         parser.add_argument('--dataset', type=str, choices=[x for x in os.listdir(data_root) if os.path.isdir(os.path.join(data_root, x))],
                             default=default_dataset, help='named testing dataset in {}'.format(data_root))
-        parser.add_argument('--smoothlvl', type=np.float, default=default_smoothlvl, help='Set the level of smoothing on class labels')
-        parser.add_argument('--resamplefactor', type=np.float, default=default_resamplefactor, help='Set the resampling factor applied to input images')
-        parser.add_argument('--concentration', type=np.float, default=default_concentration, help='Set the DP concentration parameter (low=few classes, high=many)')
+        parser.add_argument('--smoothlvl', type=float, default=default_smoothlvl, help='Set the level of smoothing on class labels')
+        parser.add_argument('--maskval', type=float, default=default_maskval, help='ignore data below a threshold value')
+        parser.add_argument('--resamplefactor', type=float, default=default_resamplefactor, help='Set the resampling factor applied to input images')
+        parser.add_argument('--concentration', type=float, default=default_concentration, help='Set the DP concentration parameter (low=few classes, high=many)')
         parser.add_argument('--ftype', type=str, choices=['float32', 'float64'], default=default_ftype, help='set floating point bit-depth')
         parser.add_argument('--resume-from', type=str, default=None, help='continue sampling from pickled results path')
         # parse args
@@ -68,16 +70,15 @@ def execute(root='.'):
         ftype          = args.ftype
         dataset        = args.dataset
         datapath       = os.path.join(data_root, dataset)
+        maskval        = args.maskval
         smoothlvl      = max(0, args.smoothlvl)
         resamplefactor = max(0.01, min(4, args.resamplefactor))
         concentration  = args.concentration
         visualize      = args.visualize
-        notify         = args.notify
         verbose        = args.verbose
         maxiter        = args.maxiter
         burnin         = args.burnin
         resume         = args.resume_from
-        helpers.hide_stats_warnings = args.showstatwarnings
 
         if resume:
             with open(resume, 'rb') as f:
@@ -111,7 +112,7 @@ def execute(root='.'):
         # semi-permanent settings
         rand.seed(21) #numpy
         random.seed(21) #python
-        init_nclasses = 6 # randomly init items into # groups per image and # global groups
+        init_nclasses = 4 # randomly init items into # groups per image and # global groups
 
         #==================#
         # Model Definition #
@@ -121,53 +122,42 @@ def execute(root='.'):
             logger.info('loading images from {}.....'.format(datapath))
             _docs, _masks, sizes, fnames, dim = fileio.loadImageSet(datapath, ftype=ftype, resize=resamplefactor)
             if len(_docs) < 1: raise RuntimeError('No images were loaded')
-            docs, masks = fileio.mask(_docs, masks=_masks, maskval=1e-1)
-            docs = fileio.normalize(docs)
+            docs, masks = fileio.mask(_docs, masks=_masks, maskval=maskval)
+            #  docs = fileio.normalize(docs)
         Nj = len(docs)                       # number of images
         Ni = [doc.shape[0] for doc in docs]  # list of image sizes (linear)
         if visualize:
+            # save mosaic of images and masks if used
             imcollection = [fileio.unmask(docs[j], masks[j], fill_value=0, channels=docs[j].shape[-1]).reshape((*sizes[j], dim))
-                           for j in range(Nj)]
-            maskcollection = [masks[j].reshape((*sizes[j]))*255
                            for j in range(Nj)]
             fname = os.path.join(p_figs, '0_images')
             fileio.saveMosaic(fileio.splitSlices(imcollection), fname, cmap='gray', header='input images', footer='resample factor: {}'.format(resamplefactor))
-            if masks is not None:
+            if masks[0] is not None:
+                maskcollection = [masks[j].reshape((*sizes[j]))*255 for j in range(Nj)]
                 fname = os.path.join(p_figs, '0_masks')
                 fileio.saveMosaic(fileio.splitSlices(maskcollection), fname, cmap='gray', header='input images', footer='resample factor: {}'.format(resamplefactor))
-        logger.info('found {} images with dim={}'.format(len(docs), dim))
+        logger.info('found {} images with {} channel{}'.format(len(docs), dim, 's' if dim>1 else ''))
 
         # hyperparameter settings
-        hp_gamma  = concentration      # global DP concentration param (higher encourages more global classes to be created)
-        hp_a0     = concentration      # document-wise DP concentration param (higher encourages more document groups to be created)
-        hp_n      = dim                # Wishart Deg. of Freedom (must be > d-1)
-        hp_k      = 1                  # mean prior - covariance scaling param
-        hp_mu     = np.average([np.mean(x, axis=0) for x in docs])      # mean prior - location param (d-rank vector)
-        # mean prior - covariance matrix (dxd-rank matrix)
-        hp_lbdinv = linalg.norm(np.concatenate([doc-hp_mu for doc in docs]), axis=0)**2 \
-                  / np.sum(doc.shape[0] for doc in docs) * np.eye(dim)
-        # MRF params
-        mrf_lbd   = smoothlvl            # strength of spatial group label smoothness
+        hp_n      = dim                                                        # Wishart Deg. of Freedom (must be > d-1)
+        hp_k      = 1                                                          # mean prior - covariance scaling param
+        hp_mu     = np.average([np.average(x, axis=0) for x in docs])             # mean prior - location param (d-rank vector)
+        hp_cov    = linalg.norm(np.concatenate([doc-hp_mu for doc in docs]), axis=0)**2 \
+                  / (dim * np.sum(doc.shape[0] for doc in docs)) * np.eye(dim) # mean prior - covariance matrix (dxd-rank matrix)
 
         # validate hyperparam settings
-        assert hp_n >= dim
+        hp_gamma  = concentration  # global DP concentration param (higher encourages more global classes to be created)
+        hp_a0     = concentration  # document-wise DP concentration param (higher encourages more document groups to be created)
+        mrf_lbd   = smoothlvl      # strength of spatial group label smoothness
         assert hp_gamma > 0
         assert hp_a0 > 0
-        assert hp_k > 0
-        assert hp_lbdinv.ndim == 2 and hp_lbdinv.shape[0] == hp_lbdinv.shape[1] == dim
+        assert mrf_lbd >= 0
 
         # bookkeeping vars
-        # rather than recompute class avgs/scatter-matrix on each sample, maintain per-class data outer-product
-        # and sum (for re-evaluating class avg) and simply update for each member insert/remove
-        # each of these classes exposes insert(v)/remove(v) methods and value property
-        ModelEvidenceNIW.dim_0 = dim
-        ModelEvidenceNIW.n_0 = hp_n
-        ModelEvidenceNIW.k_0 = hp_k
-        ModelEvidenceNIW.mu_0 = hp_mu
-        ModelEvidenceNIW.lbdinv_0 = hp_lbdinv
-        prior    = ModelEvidenceNIW()
+        # maintain class evidence containers which expose insert(x)/remove(x) methods and marginal likelihood functions
+        prior = ModelEvidenceNIW(hp_n, hp_k, hp_mu, hp_cov)
         if not resume:
-            evidence = [ModelEvidenceNIW() for i in range(init_nclasses)] # len==Nk at all times
+            evidence = [prior.copy() for i in range(init_nclasses)] # len==Nk at all times
             n = [[0]*init_nclasses for j in range(Nj)]  # len==Nj at all times for outerlist, len==Nt[j] at all times for inner list
                                               #     counts number of data items in doc j assigned to group t
                                               #     index as: n[j][t]
@@ -176,13 +166,6 @@ def execute(root='.'):
                                               # we can obtain m_dotdot (global number of groups) by summing elements in m
 
             # initialize latent parameters - traces will be saved
-            #  z_coll = [Trace() for i in range(Nj)]    # nested collection of cluster assignment (int) traces for each item in each doc
-            #                                           #     each is a numpy int array indicating full document cluster assignments
-            #                                           #     index as: z_coll[j][i] - produces array of class assignment
-            #  m_coll = [Trace()]                       # expected number of "groups" - len==Nk at all times, each Trace
-            #                                           #     is array with shape=(Nj,)
-            #                                           #     index as: m_coll[k][j]
-
             # nested collection of group assignment (int) traces for each item in each doc
             #   each item is np.array of integers between 0..(Tj)-1
             #   index as: t_coll[j].value[i]  [size doesnt change]
@@ -227,12 +210,10 @@ def execute(root='.'):
             return len(k_coll[j].value)
         def numClasses():
             return len(m)
-        def createNewGroup():
-            pass
         def createNewClass():
             m.append(1)
             # create a tracked evidence object for the new class
-            evidence.append(ModelEvidenceNIW())
+            evidence.append(prior.copy())
             logger.debug2('new class created: k[{}]; {} active classes (+{} empty)'.format(
                 numActiveClasses(), numActiveClasses(), numClasses()-numActiveClasses()))
 
@@ -392,13 +373,13 @@ def execute(root='.'):
                     # sample tnext
                     Nt = numGroups(j)
                     Nk = numClasses()
-                    margL = np.zeros((Nk,))
+                    logMargL = np.zeros((Nk,))
                     for kk in range(Nk):
                         if isClassEmpty(kk): continue
-                        margL[kk] = evidence[kk].marginalLikelihood(data)
-                    margL_prior = prior.marginalLikelihood(data)
+                        logMargL[kk] = evidence[kk].logMarginalLikelihood(data)
+                    logMargL_prior = prior.logMarginalLikelihood(data)
                     mrf_args = (i, t_coll[j].value, sizes[j], mrf_lbd, k_coll[j].value) if mrf_lbd != 0 else None
-                    tnext = helpers.sampleT(n[j], k_coll[j].value, m+[hp_gamma], hp_a0, margL, margL_prior, mrf_args)
+                    tnext = helpers.sampleT(n[j], k_coll[j].value, m+[hp_gamma], hp_a0, logMargL, logMargL_prior, mrf_args)
                     t_coll[j].value[i] = tnext
                     logger.debug3('tnext={} of [0..{}] (Nt={}, {} empty)'.format( tnext, Nt-1, Nt, Nt-numActiveGroups(j) ))
                     if tnext >= Nt:
@@ -406,7 +387,7 @@ def execute(root='.'):
                         n[j].append(1)
                         logger.debug2('new group created: t[{}][{}]; {} active groups in doc {} (+{} empty)'.format(
                             j, tnext, numActiveGroups(j), j, Nt+1-numActiveGroups(j) ))
-                        knext = helpers.sampleK(m+[hp_gamma], margL, margL_prior)
+                        knext = helpers.sampleK(m+[hp_gamma], logMargL, logMargL_prior)
                         k_coll[j].value.append(knext)
                         logger.debug3('knext={} of [0..{}] ({} empty)'.format(knext, Nk-1, Nk-numActiveClasses()))
                         if knext >= Nk: createNewClass()
@@ -441,12 +422,12 @@ def execute(root='.'):
                         evidence_copy.remove(data)
 
                     # compute joint marginal likelihoods for data in group tnext
-                    jointMargL = np.zeros((Nk,))
+                    jointLogMargL = np.zeros((Nk,))
                     for kk in range(Nk):
                         if isClassEmpty(kk): continue
-                        jointMargL[kk] = (evidence_copy if kk==kprev else evidence[kk]).jointMarginalLikelihood(data_t)
-                    jointMargL_prior = prior.jointMarginalLikelihood(data_t)
-                    knext = helpers.sampleK(m+[hp_gamma], jointMargL, jointMargL_prior)
+                        jointLogMargL[kk] = (evidence_copy if kk==kprev else evidence[kk]).jointLogMarginalLikelihood(data_t)
+                    jointLogMargL_prior = prior.jointLogMarginalLikelihood(data_t)
+                    knext = helpers.sampleK(m+[hp_gamma], jointLogMargL, jointLogMargL_prior)
                     if knext >= Nk: createNewClass()
                     else: m[knext] += 1
 
@@ -460,7 +441,6 @@ def execute(root='.'):
                             evidence[knext].insert(data)
 
                     if exit_signal_recieved: exit_early()
-                #  time.sleep(10)
                 # END group loop
             # END Image loop
 

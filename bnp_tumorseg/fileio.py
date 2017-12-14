@@ -14,25 +14,24 @@ from pymedimage.fileio.common_naming import gettype_BRATS17
 from pymedimage.visualgui import multi_slice_viewer as view3d
 import re
 
+logger = logging.getLogger(__name__)
+logging.getLogger('PIL').setLevel(logging.WARNING) # suppress PIL logging
+#  logging.getLogger('pymedimage').setLevel(logging.DEBUG)
+
 def gettype_rtfeature(fname):
     m = re.search(r'feature=(\w+)_args', fname)
     if m is not None: return m.group(1)
     else: return None
 
-logger = logging.getLogger(__name__)
-logging.getLogger('PIL').setLevel(logging.WARNING) # suppress PIL logging
-logging.getLogger('pymedimage').setLevel(logging.DEBUG)
-
 def loadImageSet(dname, **kwargs):
-    try:
-        result = loadImageSet_natural(dname, **kwargs)
-        if result: return result
-    except: pass
-
-    result = loadImageSet_medical(dname, **kwargs)
-    if result: return result
-
-    raise RuntimeError('Failed to load images at "{}"'.format(dname))
+    excepts = []
+    for loader in [loadImageSet_natural, loadImageSet_medical]:
+        try:
+            result = loader(dname, **kwargs)
+            if result: return result
+        except Exception as e:
+            excepts.append(e)
+    raise RuntimeError('Failed to load images at "{}" with error(s):\n{}'.format(dname, '\n\n'.join([str(e) for e in excepts])))
 
 def loadImageSet_medical(dname, visualize=False, ftype='float32', normalize=True, resize=None):
     """recursively walk within dname, loading each directory of images as a separate 'document' with mulitple

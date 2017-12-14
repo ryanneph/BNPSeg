@@ -41,112 +41,88 @@ def choleskyLogDet(L):
 
 
 class ModelEvidenceNIW():
-    """Wrapper for updating cluster evidence through insertion/removal operations of each data item
-    The following properties are exposed and updated/downdated using the class insert/remove methods:
+    """Wrapper for updating cluster evidence through insertion/removal operations of each data item"""
 
-    avg            - keeps a running avg of data items in the cluster with efficient updating
-    op             - keeps a running outer product of data items in cluster with efficient updating
-    cholcov        - keeps a running upper triangular cholesky decomposition of the covariance with efficient
-                     rank - 1 updates/downdates (internal storage is upper triangular Lstar)
-    """
-    # Class Static hyperparam storage
-    n_0 = None
-    k_0 = None
-    mu_0 = None
-    lbdinv_0 = None
-    dim_0 = None
+    def __init__(self, n, k, mu, cov, U=None):
+        """initialize the prior"""
+        mu = np.atleast_1d(mu)
+        cov = np.atleast_2d(cov)
+        self._count = 0
+        self._dim   = mu.size
+        self._n     = n
+        self._k     = k
+        self._mu    = mu
+        self._U     = cholesky(cov + k*np.outer(mu, mu)).T
+        if U is not None: self._U = np.atleast_2d(U)
 
-    def __init__(self, **kwargs):
-        # store evidence components
-        if 'dim' in kwargs:
-            self._dim = kwargs['dim']
-        elif self.dim_0 is not None:
-            self._dim = self.dim_0
-        else:
-            self._dim = 1
+        # caching
+        self._cache = {}
 
-        if 'count' in kwargs:
-            self._count = kwargs['count']
-        else:
-            self._count = 0
+        # validate hyperparam settings
+        assert n >= self._dim
+        assert k > 0
+        assert cov.shape == tuple([self._dim]*2)
 
-        if 'sum' in kwargs:
-            self._sum = kwargs['sum']
-        else:
-            self._sum = np.zeros((self._dim,))
+    def __str__(self):
+        return '{}\n'.format(self.__repr__()) +\
+               'count: {}\n'.format(self.count) +\
+               'dim:   {}\n'.format(self.dim) +\
+               'n:     {}\n'.format(self.n) +\
+               'k:     {}\n'.format(self.k) +\
+               'mu:    {}\n'.format(self.mu) +\
+               '_U:    {}\n'.format(self._U) + \
+               'U:     {}\n'.format(self.U)
 
-        if 'outprod' in kwargs:
-            self._outprod = kwargs['outprod']
-        else:
-            self._outprod = np.zeros((self._dim, self._dim))
+    def _resetCache(self):
+        """remove all cached vars"""
+        self._cache = {}
 
-        if 'Lstar' in kwargs:
-            self._cholcov = kwargs['Lstar']
-        elif 'covariance' in kwargs:
-            self._cholcov = cholesky(kwargs['covariance']).T
-        elif self.lbdinv_0 is not None:
-            self._cholcov = cholesky(self.lbdinv_0)
-        else:
-            self._cholcov = np.zeros((self._dim, self._dim))
+    def _insertOne(self, x):
+        assert x.ndim <= 1
+        assert x.size == self._dim
+        self._count += 1
+        self._n  += 1
+        self._k  += 1
+        self._mu  = self._mu + (x-self._mu)/self._k
+        choldate.cholupdate(self._U, np.copy(x))
 
-    def __copy__(self):
-        obj = self.__class__()
-        obj._dim = copy(self._dim)
-        obj._count = copy(self._count)
-        obj._sum = copy(self._sum)
-        obj._outprod = copy(self._outprod)
-        obj._cholcov = copy(self._cholcov)
-        return obj
-
-    def __deepcopy__(self, memodict):
-        obj = self.__class__()
-        obj._dim = deepcopy(self._dim, memodict)
-        obj._count = deepcopy(self._count, memodict)
-        obj._sum = deepcopy(self._sum, memodict)
-        obj._outprod = deepcopy(self._outprod, memodict)
-        obj._cholcov = deepcopy(self._cholcov, memodict)
-        return obj
+    def _removeOne(self, x):
+        assert x.ndim <= 1
+        assert x.size == self._dim
+        self._count -= 1
+        self._n  -= 1
+        self._k  -= 1
+        self._mu  = self._mu - (x-self._mu)/self._k
+        choldate.choldowndate(self._U, np.copy(x))
 
     def copy(self):
-        return deepcopy(self)
+        new = deepcopy(self)
+        assert self._U is not new._U
+        return new
 
     def insert(self, x):
-        if ma.getmask(x).any():
-            raise ValueError('attempt to insert masked data from evidence')
-        self._count += 1
-        self._insert_sum(x)
-        #  self._insert_outprod(x)
-        self._insert_cholcov(x)
+        x = np.atleast_1d(np.squeeze(x))
+        if x.ndim <= 1:
+            self._insertOne(x)
+        elif x.ndim == 2:
+            for item in x:
+                self._insertOne(x)
+        else:
+            raise ValueError('input "{}" must have ndim == 1 or 2 not {}'.format(x, x.ndim))
+        self._resetCache()
 
     def remove(self, x):
-        if ma.getmask(x).any():
-            raise ValueError('attempt to remove masked data from evidence')
         if self._count <=0:
-            raise RuntimeError('{} has no data items to remove'.format(self.__class__.__name__))
-        self._count -= 1
-        self._remove_sum(x)
-        #  self._remove_outprod(x)
-        self._remove_cholcov(x)
-
-    def _insert_sum(self, x):
-        self._sum += x
-
-    def _remove_sum(self, x):
-        self._sum -= x
-
-    def _insert_outprod(self, x):
-        self._outprod += np.outer(x, x)
-
-    def _remove_outprod(self, x):
-        self._outprod -= np.outer(x, x)
-
-    def _insert_cholcov(self, v):
-        # count has already been incremented by 1, so we subtract 1 from each count
-        choldate.cholupdate(self._cholcov, sqrt((self.k_0 + self._count)/(self.k_0 + self._count-1)) * (self.mu_m - v) )
-
-    def _remove_cholcov(self, v):
-        # count has already been decremented by 1, so we add 1 from each count
-        choldate.choldowndate(self._cholcov, sqrt((self.k_0 + self._count)/(self.k_0 + self._count+1)) * (self.mu_m - v) )
+            raise RuntimeError('This {} has no data items to remove'.format(self.__class__.__name__))
+        x = np.atleast_1d(np.squeeze(x))
+        if x.ndim <= 1:
+            self._removeOne(x)
+        elif x.ndim == 2:
+            for item in x:
+                self._removeOne(x)
+        else:
+            raise ValueError('input "{}" must have ndim == 1 or 2 not {}'.format(x, x.ndim))
+        self._resetCache()
 
     @property
     def count(self):
@@ -156,39 +132,41 @@ class ModelEvidenceNIW():
     def dim(self):
         return self._dim
 
-    # Model Parameter Updates
-    @property
-    def n_m(self):
-        return self.n_0 + self.count
+    @dim.setter
+    def dim(self, v):
+        assert self._n >= v
+        self._dim = v
 
     @property
-    def k_m(self):
-        return self.k_0 + self.count
+    def nu(self):
+        return (self._n - self._dim + 1)
 
     @property
-    def mu_m(self):
-        return (self.k_0*self.mu_0 + self._sum) / (self.k_0 + self._count)
+    def n(self):
+        return self._n
 
     @property
-    def cholcov_m(self):
-        # return lower triangular matrix L
-        return self._cholcov.T
-        #  return cholesky(self.lbdinv_0 + self.outprod - (self.k_0 + self.count)*np.outer(self.mu_m, self.mu_m) + self.k_0*np.outer(self.mu_0, self.mu_0)).T
-
-    # Class Evidence States
-    @property
-    def sum(self):
-        return self._sum
+    def k(self):
+        return self._k
 
     @property
-    def outprod(self):
-        return self._outprod
+    def mu(self):
+        return self._mu
 
-    # Convenience
     @property
-    def avg(self):
-        if self._count <= 0: return 0
-        else: return self._sum / self._count
+    def U(self):
+        if 'U' in self._cache:
+            return self._cache['U']
+        Utemp = np.copy((self._U))
+        choldate.choldowndate(Utemp, sqrt(self._k)*self._mu)
+        trueU = Utemp * sqrt( (1+(1/self._k))/(self.nu) )
+        # update cache
+        self._cache['U'] = trueU
+        return trueU
+
+    @property
+    def L(self):
+        return (self.U).T
 
     def logMarginalLikelihood(self, x):
         """Computes marginal likelihood for a data vector given the model evidence of a Gaussian-Wishart
@@ -206,29 +184,41 @@ class ModelEvidenceNIW():
             float describing marginal likelihood that data x belongs to cluster k given model evidence avg
         """
         # intermediate steps - bayesian param update is already stored in evidence
-        #    note here that m denotes number of evidence data items in each cluster k - not including x
-        d    = self.dim
-        n_m  = self.n_m
-        k_m  = self.k_m
-        mu_m = self.mu_m
-        L    = self.cholcov_m
-
-        # intermediate steps - T-dist inputs
-        nu = n_m - d + 1
-        c = (k_m+1)/(k_m*nu)
+        d  = self.dim
+        nu = self.nu
+        n  = self.n
+        mu = self.mu
+        L  = self.L
 
         # compute student's T density given updated params
-        tdensln = gammaln(0.5*(n_m+1)) - gammaln(0.5*nu) \
-                - 0.5*(d*(log(nu*pi) + log(c)) + choleskyLogDet(L)) \
-                - (0.5*(n_m+1))*log(1+ (1/(c*nu))*choleskyQuadForm(L, x-mu_m))
-        if __debug__ and not tdensln<=0 and logger.getEffectiveLevel() <= loggers.DEBUG3:
+        t1 = gammaln(0.5*(n+1)) - gammaln(0.5*nu)
+        t2 = - 0.5*(d*log(nu*pi) + choleskyLogDet(L))
+        t3 = - (0.5*(n+1))*log(1+(1/nu)*choleskyQuadForm(L, x-mu))
+        tdensln = t1 + t2 + t3
+        #TODO REMOVE DEBUG
+        #  tdens = exp(tdensln)
+        #  msg = "tdensln: {}\n".format(tdensln) + \
+        #  "gammln1: {}\n".format(gammaln(0.5*(n+1))) + \
+        #  "gammln2: {}\n".format(gammaln(0.5*(nu))) + \
+        #  "chollogdet: {}\n".format(choleskyLogDet(L)) + \
+        #  "L: {}\n".format(L) +\
+        #  "diag(L): {}\n".format(np.diagonal(L)) +\
+        #  "term 1: {}\n".format(t1+t2) + \
+        #  "term 3: {}\n".format(t3) + \
+        #  "tdens:  {}".format(tdens)
+        #  print(msg)
+        #TODO REMOVE END DEBUG
+        if not tdensln<=0:
             tdens = exp(tdensln)
-            msg = "tdensln: {}\n".format(tdensln) + \
-            "term 1: {}\n".format(gammaln(0.5*(n_m+1)) - gammaln(0.5*nu) - (0.5*d)*(log(nu*pi) + log(c))) + \
-            "term 2: {}\n".format(choleskyLogDet(L)) + \
-            "term 3: {}\n".format((0.5*(n_m+1))*log(1+ (1/(c*nu))*choleskyQuadForm(L, np.abs(x-mu_m)))) + \
-            "tdens:  {}".format(tdens)
-            logger.warning('result of marginal likelihood is not a valid probability between 0->1: {:0.3e}\n{}'.format(tdens, msg))
+            msg = \
+                "evidence:\n{}\n".format(self) + \
+                "data:    {}\n".format(x) + \
+                "term 1:  {}\n".format(t1) + \
+                "term 2:  {}\n".format(t2) + \
+                "term 3:  {}\n".format(t3) + \
+                "tdensln: {}\n".format(tdensln) + \
+                "tdens:   {}".format(tdens)
+            raise ValueError('result of marginal likelihood is not a valid probability between 0->1: {:0.3e}\n{}'.format(tdens, msg))
         return tdensln
 
     def marginalLikelihood(self, x):

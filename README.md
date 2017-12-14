@@ -16,8 +16,11 @@ Running the code for the first time is easy, just follow these steps after you h
     ```
 2. Enter the project directory and run on one of the sample datasets:
     ```bash
-    cd bnp-tumorseg 
-    python bnp-tumorseg/main.py --dataset balloons
+    python run.py --dataset=balloons
+    ```
+* Check out all of the available options with:
+    ```bash
+    python run.py --help
     ```
 On every iteration, the t-index and k-index _mode_ maps are saved to `./figures/<dataset>/`, and logfiles are saved to `./logs/`. Presently, the full trace histories for t-index, k-index, and beta random variables are stored to file in `./blobs/<dataset>` at the end of the sampling stage.
 

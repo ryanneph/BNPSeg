@@ -2,31 +2,23 @@ import math
 import numpy as np
 import numpy.random as rand
 from scipy import special
+from scipy.misc import logsumexp
 import logging
 from . import loggers
 from .wrappers import exp, log, gammaln
 
 logger = logging.getLogger(__name__)
-hide_stats_warnings = True
 
 def sampleCatDist(wts):
     """Draw 0-based index from categorical distribution"""
-    # check for inf/nan/extremes
     wtsum = np.sum(wts)
     if wtsum<=0 or wtsum==np.NaN or wtsum==np.Inf:
-        # usually occurs becuase margL is 0 for all classes
-        # TODO: should set to [0, ..., 0, 1] indicating guaranteed new class
-        if not hide_stats_warnings: logger.warning("unstable categorical weights vector with sum(wts)={}.".format(wtsum))
-        #  raise RuntimeError
-        wts = np.ones_like(wts) / len(wts)
-        if not hide_stats_warnings: logger.warning("Setting uniform weights: {}".format(wts))
-    else:
-        # normalize
-        wts = wts / np.sum(wts)
-        logger.debug3('cat wts: {}'.format(wts))
-        # check for invalid params
-        if __debug__ and not ((0<=wts).all and (wts<=1).all() and math.isclose(np.sum(wts), 1)):
-            raise AssertionError("invalid categorical weights vector: {}".format(str(wts)))
+        raise RuntimeError("unstable categorical weights vector with sum(wts)={}.".format(wtsum))
+    wts = wts / np.sum(wts) # normalize
+    # check for invalid params
+    if not ((0<=wts).all and (wts<=1).all() and math.isclose(np.sum(wts), 1)):
+        raise RuntimeError("invalid categorical weights vector: {}".format(str(wts)))
+    logger.debug3("weights: {}".format(wts))
     return np.nonzero(rand.multinomial(1, wts))[0][0]
 
 def sampleDirDist(alpha):
@@ -40,7 +32,7 @@ def sampleDirDist(alpha):
     """
     return rand.dirichlet(alpha).tolist()
 
-def likelihoodTnew(beta, margL, margL_prior):
+def logLikelihoodTnew(beta, logMargL, logMargL_prior):
     """calculate data likelihood given that data item belongs to new group tnew
     computes: P(x_ji|tvect, t_ji=tnew, kvect)
 
@@ -50,18 +42,19 @@ def likelihoodTnew(beta, margL, margL_prior):
         margL (list): list of precomputed marginal likelihoods for each cluster k
         margL_prior (float): prior for data item given membership in new cluster knew
     """
-    val = 0
+    a = np.zeros((len(beta), ))
     for k in range(len(beta)-1):
         if beta[k] <= 0:
             continue
-        val += margL[k] * beta[k]
-    val += beta[-1] * margL_prior
-    val /= np.sum(beta)
-    if __debug__ and not 0<=val<=1 and logger.getEffectiveLevel() <= loggers.DEBUG3:
-        if not hide_stats_warnings: logger.warning('invalid likelihood encountered: {}'.format(val))
+        a[k] = log(beta[k]) + logMargL[k]
+    a[-1] = log(beta[-1]) + logMargL_prior
+    a -= log(np.sum(beta))
+    val = logsumexp(a)
+    if not 0<=exp(val)<=1:
+        raise RuntimeError('invalid likelihood encountered: {}'.format(exp(val)))
     return val
 
-def sampleT(n_j, k_j, beta, a0, margL, margL_prior, mrf_args=None):
+def sampleT(n_j, k_j, beta, a0, logMargL, logMargL_prior, mrf_args=None):
     """Draw t from a DP over Nt existing groups in the doc and one new group
 
     Args:
@@ -77,62 +70,33 @@ def sampleT(n_j, k_j, beta, a0, margL, margL_prior, mrf_args=None):
         mrf_args (tuple): tuple of valid arguments to be passed to MRF() (if None, don't use MRF)
     """
     Nt = len(n_j)
-    wts = np.zeros((Nt+1,))
+    logwts = np.zeros((Nt+1,))
     for t in range(Nt):
-        if n_j[t] <= 0:
-            continue
-        wts[t] = n_j[t] * margL[k_j[t]] # t=texist
+        logwts[t] = log(n_j[t]) + logMargL[k_j[t]] # t=texist
         if mrf_args is not None:
-            wts[t] *= MRF(t, *mrf_args)
-    wts[Nt] = a0 * likelihoodTnew(beta, margL, margL_prior) # t=tnew
+            logwts[t] += logMRF(t, *mrf_args)
+    logwts[Nt] = log(a0) + logLikelihoodTnew(beta, logMargL, logMargL_prior) # t=tnew
     # draw t
-    tnext = sampleCatDist(wts)
+    normalized_wts = np.exp(logwts - logsumexp(logwts))
+    tnext = sampleCatDist(normalized_wts)
     return tnext
 
-def sampleK(beta, margL, margL_prior, mrf_args=None):
+def sampleK(beta, logMargL, logMargL_prior, mrf_args=None):
     """draw k from Nk existing global classes and one new class
     specify mrf_args if MRF constraint should be used directly on k-map"""
     Nk = len(beta)-1
-    wts = np.zeros((Nk+1,))
+    logwts = np.zeros((Nk+1,))
     for k in range(Nk):
-        if beta[k] <= 0:
-            continue
-        # k=kexist
-        try:
-            wts[k] = beta[k] * margL[k]
-        except:
-            print(wts.shape, len(beta), len(margL))
+        logwts[k] = log(beta[k]) + logMargL[k] # k=kexist
         if mrf_args is not None:
-            wts[k] *= MRF(k, *mrf_args)
-    wts[Nk] = beta[-1] * margL_prior # k=knew
+            logwts[k] += logMRF(k, *mrf_args)
+    logwts[Nk] = log(beta[-1]) + logMargL_prior # k=knew
     # draw k
-    knext = sampleCatDist(wts)
+    normalized_wts = np.exp(logwts - logsumexp(logwts))
+    knext = sampleCatDist(normalized_wts)
     return knext
 
-def sampleBeta(m, hp_gamma):
-    """Sample beta from dirichlet distribution, filling beta_k=0 where m_k==0"""
-    m = np.array(m)
-    alpha = np.append(m[m>0], hp_gamma)
-    res = sampleDirDist(alpha)
-    active_counter = 0
-    beta = []
-    for k in range(len(m)):
-        if m[k]<=0:
-            beta.append(0)
-        else:
-            beta.append(res[active_counter])
-            active_counter += 1
-    beta.append(res[-1])
-    return beta
-
-def augmentBeta(beta, gamma):
-    b = rand.beta(1, gamma)
-    bu = beta[-1]
-    beta[-1] = b*bu
-    beta.append((1-b)*bu)
-    return beta
-
-def MRF(v, i, t_j, imsize, lbd, k_j=None):
+def logMRF(v, i, t_j, imsize, lbd, k_j=None):
     """compute Markov Random Field constraint probability using group labels of neighboring data items
 
     Args:
@@ -165,8 +129,11 @@ def MRF(v, i, t_j, imsize, lbd, k_j=None):
                 val += int(v == t_ji)
             else:
                 val += int(k_j[v] == k_j[t_ji])
-    val = math.exp(lbd * val)
+    val += log(lbd)
     return val
+
+def MRF(*args, **kwargs):
+    return exp(logMRF(*args, **kwargs))
 
 def constructfullKMap(tmap, kmap):
     """construct a complete k-map from the complete t-map and mapping between t-vals and k-vals"""

@@ -10,9 +10,15 @@ def handle_math_error(x, op):
     except OverflowError as e:
         logger.warning('{} for operation: {}({})'.format(e, op.__name__, x))
         return float('inf')
+    except Exception as e:
+        logger.error('{} for operation: {}({})'.format(e.__class__.__name_, op.__name__, x))
+        raise e
 
 def log(x):
-    return handle_math_error(x, math.log)
+    if x == 0:
+        return float('-inf')
+    else:
+        return handle_math_error(x, math.log)
 
 def exp(x):
     return handle_math_error(x, math.exp)

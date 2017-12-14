@@ -7,6 +7,5 @@ from bnp_tumorseg import hdpcluster
 # setup logger
 logger = logging.getLogger()
 
-
 if __name__ == '__main__':
-    hdpcluster.execute(root='.')
+    hdpcluster.execute(root='./temp', data_root='./test_files')

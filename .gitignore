@@ -1,4 +1,2 @@
-logs
-figures
-blobs
-bnp_gibbs/config.py
+temp/
+bnp_tumorseg/config.py
