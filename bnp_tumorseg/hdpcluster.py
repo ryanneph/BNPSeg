@@ -358,6 +358,7 @@ def execute(root='.', data_root=None):
             signal.signal(signal.SIGINT, lambda sig, frame: sys.exit(1))
 
             logger.warning('SIGINT recieved. Cleaning up and exiting early')
+            if notify: pushNotification('Early Exit', 'SIGINT recieved. Cleaning up and exiting early')
             cleanup(fname='data@iter#{}.pickle'.format(ss_iter))
             sys.exit(1)
         # advance to next safe breakpoint in sampler before exiting
