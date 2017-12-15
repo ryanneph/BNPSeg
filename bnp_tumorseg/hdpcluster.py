@@ -158,12 +158,12 @@ def execute(root='.', data_root=None):
                 maskcollection = [masks[j].reshape((*sizes[j]))*255 for j in range(Nj)]
                 fname = os.path.join(p_figs, '0_masks')
                 fileio.saveMosaic(fileio.splitSlices(maskcollection), fname, cmap='gray', header='input images', footer='resample factor: {}'.format(resamplefactor))
-        logger.info('found %d images with %d channel%s'.format(len(docs), dim, 's' if dim>1 else ''))
+        logger.info('found %d images with %d channel%s', len(docs), dim, 's' if dim>1 else '')
 
         # hyperparameter settings
         hp_n      = dim                                                        # Wishart Deg. of Freedom (must be > d-1)
         hp_k      = 1                                                          # mean prior - covariance scaling param
-        hp_mu     = np.average([np.average(x, axis=0) for x in docs])             # mean prior - location param (d-rank vector)
+        hp_mu     = np.average([np.average(x, axis=0) for x in docs], axis=0)  # mean prior - location param (d-rank vector)
         hp_cov    = linalg.norm(np.concatenate([doc-hp_mu for doc in docs]), axis=0)**2 \
                   / (dim * np.sum(doc.shape[0] for doc in docs)) * np.eye(dim) # mean prior - covariance matrix (dxd-rank matrix)
 
