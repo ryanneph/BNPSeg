@@ -20,6 +20,7 @@ from . import fileio, helpers, loggers
 from .trace import Trace
 from .evidence import ModelEvidenceNIW
 from .notifications import pushNotification
+from .version import VERSION_FULL
 from pymedimage.visualgui import multi_slice_viewer as view3d
 
 # setup logger
@@ -39,59 +40,53 @@ def execute(root='.', data_root=None):
     default_maxiter        = 30
     default_burnin         = 40
     default_smoothlvl      = 0
-    default_maskval        = None
     default_resamplefactor = 1
     default_concentration  = 1
+    default_maskval        = None
+    default_nclasses       = 4
     default_ftype          = 'float64'
     default_dataset        = 'blackwhite_sub'
     default_visualize      = True
     notify                 = False
-    default_verbose        = 0
+    default_assert         = False
+    default_verbose        = 0 # can choose 0->3
 
     cleanup = None
     try:
         parser = argparse.ArgumentParser(description='Gibbs sampler for jointly segmenting vector-valued image collections',
                 formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-        parser.add_argument('--verbose', '-v', action='count', default=default_verbose, help='increase verbosity level by 1 for each flag')
-        parser.add_argument('--visualize', action='store_true', default=default_visualize, help='produce intermediate/final result figures')
-        parser.add_argument('--notify', action='store_true', default=notify, help='send push notifications')
         parser.add_argument('--maxiter', type=int, default=default_maxiter, help='maximum sampling iterations')
         parser.add_argument('--burnin', type=int, default=default_burnin, help='number of initial samples to discard in prediction')
-        parser.add_argument('--dataset', type=str, choices=[x for x in os.listdir(data_root) if os.path.isdir(os.path.join(data_root, x))],
-                            default=default_dataset, help='named testing dataset in {}'.format(data_root))
         parser.add_argument('--smoothlvl', type=float, default=default_smoothlvl, help='Set the level of smoothing on class labels')
-        parser.add_argument('--maskval', type=float, default=default_maskval, help='ignore data below a threshold value')
         parser.add_argument('--resamplefactor', type=float, default=default_resamplefactor, help='Set the resampling factor applied to input images')
         parser.add_argument('--concentration', type=float, default=default_concentration, help='Set the DP concentration parameter (low=few classes, high=many)')
+        parser.add_argument('--maskval', type=float, default=default_maskval, help='ignore data below a threshold value')
+        parser.add_argument('--nclasses', '-N', type=int, default=default_nclasses, help='randomly init items into # groups per image and # global groups')
         parser.add_argument('--ftype', type=str, choices=['float32', 'float64'], default=default_ftype, help='set floating point bit-depth')
+        parser.add_argument('--dataset', type=str, choices=[x for x in os.listdir(data_root) if os.path.isdir(os.path.join(data_root, x))],
+                            default=default_dataset, help='named testing dataset in {}'.format(data_root))
         parser.add_argument('--resume-from', type=str, default=None, help='continue sampling from pickled results path')
+        parser.add_argument('--visualize', action='store_const', const=(not default_visualize), default=default_visualize, help='toggle: produce intermediate/final result figures')
+        parser.add_argument('--notify', action='store_const', const=(not notify), default=notify, help='toggle: send push notifications')
+        parser.add_argument('--assert',  action='store_const', const=(not default_assert), default=default_assert, help='toggle: assertions for debugging')
+        parser.add_argument('--verbose', '-v', action='count', default=default_verbose, help='increase verbosity level by 1 for each flag')
         # parse args
-        args = parser.parse_args()
-        ftype          = args.ftype
-        dataset        = args.dataset
+        args = vars(parser.parse_args())
+        maxiter        = args['maxiter']
+        burnin         = args['burnin']
+        smoothlvl      = max(0, args['smoothlvl'])
+        resamplefactor = max(0.01, min(4, args['resamplefactor']))
+        concentration  = args['concentration']
+        maskval        = args['maskval']
+        init_nclasses  = args['nclasses'] # randomly init items into # groups per image and # global groups
+        ftype          = args['ftype']
+        dataset        = args['dataset']
         datapath       = os.path.join(data_root, dataset)
-        maskval        = args.maskval
-        smoothlvl      = max(0, args.smoothlvl)
-        resamplefactor = max(0.01, min(4, args.resamplefactor))
-        concentration  = args.concentration
-        visualize      = args.visualize
-        verbose        = args.verbose
-        maxiter        = args.maxiter
-        burnin         = args.burnin
-        resume         = args.resume_from
-
-        if resume:
-            with open(resume, 'rb') as f:
-                try:
-                    dataset, ss_iter, hist_numclasses, hist_numclasses_active,\
-                            docs, masks, sizes, fnames, dim, t_coll, k_coll, evidence, m, n = pickle.load(f)
-                    ss_iter -= 1
-                    for trace in t_coll + k_coll:
-                        trace.burnin = burnin
-                    logger.info('resuming at iter {} from "{}" data in "{}"'.format(ss_iter, dataset, resume))
-                except:
-                    logger.warning('Failed to resume from "{}", restarting instead'.format(resume))
-                    resume = None
+        resume         = args['resume_from']
+        visualize      = args['visualize']
+        notify         = args['notify']
+        assert_on      = args['assert']
+        verbose        = args['verbose']
 
         # make output directories
         p_figs  = os.path.join(figs_dir, dataset)
@@ -103,23 +98,50 @@ def execute(root='.', data_root=None):
 
         # setup logger
         logger = loggers.RotatingFile(os.path.join(p_logs, 'main.log'), level=loggers.INFO)
-        # reset logging level
-        if verbose <= 0:
-            logger.setLevel(loggers.INFO)
-        else:
-            logger.setLevel(loggers.DEBUG+1-verbose)
+        if verbose <= 0: logger.setLevel(loggers.INFO)
+        else:            logger.setLevel(loggers.DEBUG+1-verbose)
 
         # semi-permanent settings
-        rand.seed(21) #numpy
-        random.seed(21) #python
-        init_nclasses = 4 # randomly init items into # groups per image and # global groups
+        if assert_on:
+            rand.seed(21) #numpy
+            random.seed(21) #python
+
+        logger.debug('hdpcluster (v{}) Program Settings:\n'.format(VERSION_FULL) +\
+                     '  Max iterations:   {}\n'.format(maxiter) +\
+                     '  Burn-in period:   {}\n'.format(burnin) +\
+                     '  MRF weight:       {}\n'.format(smoothlvl) +\
+                     '  Resample factor:  {}\n'.format(resamplefactor) +\
+                     '  DP concentration: {}\n'.format(concentration) +\
+                     '  Mask threshold:   {}\n'.format(maskval) +\
+                     '  Init. Nclasses:   {}\n'.format(init_nclasses) +\
+                     '  Float bit-depth:  {}\n'.format(ftype) +\
+                     '  Dataset:          {}\n'.format(datapath) +\
+                     '  Resume-from:      {}\n'.format(resume if resume is not None else 'Disabled') +\
+                     '  Visualization:    {}\n'.format('On' if visualize else 'Off') +\
+                     '  Notifications:    {}\n'.format('On' if notify else 'Off') +\
+                     '  Assertions:       {}\n'.format('On' if assert_on else 'Off') +\
+                     '  Verbosity:        {}\n'.format(verbose)
+                     )
+
+        if resume:
+            with open(resume, 'rb') as f:
+                try:
+                    dataset, ss_iter, hist_numclasses, hist_numclasses_active,\
+                            docs, masks, sizes, fnames, dim, t_coll, k_coll, evidence, m, n = pickle.load(f)
+                    ss_iter -= 1
+                    for trace in t_coll + k_coll:
+                        trace.burnin = burnin
+                    logger.info('resuming at iter %d from "%s" data in "%s"', ss_iter, dataset, resume)
+                except:
+                    logger.warning('Failed to resume from "%s", restarting instead', resume)
+                    resume = None
 
         #==================#
         # Model Definition #
         #==================#
         # load data - load each image as a separate document (j)
         if not resume:
-            logger.info('loading images from {}.....'.format(datapath))
+            logger.info('loading images from "%s".....', datapath)
             _docs, _masks, sizes, fnames, dim = fileio.loadImageSet(datapath, ftype=ftype, resize=resamplefactor)
             if len(_docs) < 1: raise RuntimeError('No images were loaded')
             docs, masks = fileio.mask(_docs, masks=_masks, maskval=maskval)
@@ -136,7 +158,7 @@ def execute(root='.', data_root=None):
                 maskcollection = [masks[j].reshape((*sizes[j]))*255 for j in range(Nj)]
                 fname = os.path.join(p_figs, '0_masks')
                 fileio.saveMosaic(fileio.splitSlices(maskcollection), fname, cmap='gray', header='input images', footer='resample factor: {}'.format(resamplefactor))
-        logger.info('found {} images with {} channel{}'.format(len(docs), dim, 's' if dim>1 else ''))
+        logger.info('found %d images with %d channel%s'.format(len(docs), dim, 's' if dim>1 else ''))
 
         # hyperparameter settings
         hp_n      = dim                                                        # Wishart Deg. of Freedom (must be > d-1)
@@ -161,7 +183,7 @@ def execute(root='.', data_root=None):
             n = [[0]*init_nclasses for j in range(Nj)]  # len==Nj at all times for outerlist, len==Nt[j] at all times for inner list
                                               #     counts number of data items in doc j assigned to group t
                                               #     index as: n[j][t]
-            m = [init_nclasses for i in range(init_nclasses)]   # len==Nk at all times; counts number of groups (t) with cluster assigned to k
+            m = [0 for i in range(init_nclasses)]   # len==Nk at all times; counts number of groups (t) with cluster assigned to k
                                               #     index as: m[k]
                                               # we can obtain m_dotdot (global number of groups) by summing elements in m
 
@@ -182,6 +204,7 @@ def execute(root='.', data_root=None):
                 t_coll[j].append( np.zeros((Ni[j],), dtype=np.uint32) )
                 k_coll[j].append( [0]*init_nclasses )
                 for t in range(init_nclasses):
+                    m[t] += 1
                     k_coll[j].value[t] = t
                 for i, data in enumerate(doc):
                     r = random.randrange(init_nclasses)
@@ -214,8 +237,16 @@ def execute(root='.', data_root=None):
             m.append(1)
             # create a tracked evidence object for the new class
             evidence.append(prior.copy())
-            logger.debug2('new class created: k[{}]; {} active classes (+{} empty)'.format(
-                numActiveClasses(), numActiveClasses(), numClasses()-numActiveClasses()))
+            logger.debug2('new class created: k[%d]; %d active classes (+%d empty)',
+                numActiveClasses(), numActiveClasses(), numClasses()-numActiveClasses())
+        def removeClass(k):
+            m[k] = 0
+            logger.debug2('Class %d emptied', k)
+            evidence[k].disable()
+            if assert_on:
+                for j in range(Nj):
+                    if np.count_nonzero(np.array(k_coll[j].value)==k) > 1:
+                        raise RuntimeError('empty class ({}) still has loyal groups in document {}: {}'.format(k, j, np.array(k_coll[j].value)))
 
         def savePlots():
             """Create iteration histories of useful variables"""
@@ -236,12 +267,30 @@ def execute(root='.', data_root=None):
                 fig.clear()
             plt.close(fig)
 
+        def makeTMaps(mode=True):
+            """creates list of dense t-maps (group maps)"""
+            tcollection = []
+            for tc, mask, size in zip(t_coll, masks, sizes):
+                if mode: d = tc.mode(burn=(ss_iter>burnin))
+                else:    d = tc.value
+                tcollection.append(fileio.unmask(d, mask, fill_value=-1, channels=1).reshape(size))
+            return tcollection
+
+        def makeKMaps(tcollection=None, mode=True):
+            """creates list of dense k-maps (class maps)"""
+            if tcollection is None:
+                tcollection = makeTMaps(mode=mode)
+            kcollection = []
+            for tmap, kc, mask, size in zip(tcollection, k_coll, masks, sizes):
+                if mode: d = kc.mode(burn=(ss_iter>burnin))
+                else:    d = kc.value
+                kcollection.append(helpers.constructfullKMap(tmap, d))
+            return kcollection
+
         def saveImages():
             """save t, k-map modes to image files with various visual representations"""
-            tcollection = [fileio.unmask(t_coll[j].mode(burn=(ss_iter>burnin)), masks[j], fill_value=-1, channels=1).reshape(sizes[j])
-                           for j in range(Nj)]
-            kcollection = [helpers.constructfullKMap(tcollection[j], k_coll[j].mode(burn=(ss_iter>burnin)))
-                           for j in range(Nj)]
+            tcollection = makeTMaps(mode=True)
+            kcollection = makeKMaps(tcollection=tcollection, mode=True)
             tremap = fileio.remapValues(tcollection)
             kremap = fileio.remapValues(kcollection)
             for tmap, kmap, mask, size, fname in zip(tremap, kremap, masks, sizes, fnames):
@@ -251,24 +300,22 @@ def execute(root='.', data_root=None):
                 fileio.saveImage(kmap, os.path.join(p_figs_final, base+'_k_gray'+ext), mode='L', resize=1/resamplefactor)
 
         def make_class_maps():
-            tcollection = [fileio.unmask(t_coll[j].mode(burn=(ss_iter>burnin)), masks[j], fill_value=-1, channels=1).reshape(sizes[j])
-                           for j in range(Nj)]
+            tcollection = makeTMaps(mode=True)
             fname = os.path.join(p_figs, 'iter_{:04}_t'.format(ss_iter))
             fileio.saveMosaic(tcollection, fname, header='region labels', footer='iter: {}'.format(ss_iter), cmap="tab20b", colorbar=True, remap_values=True)
 
-            kcollection = [helpers.constructfullKMap(tcollection[j], k_coll[j].mode(burn=(ss_iter>burnin)))
-                           for j in range(Nj)]
+            kcollection = makeKMaps(tcollection=tcollection, mode=True)
             fname = os.path.join(p_figs, 'iter_{:04}_k'.format(ss_iter))
             fileio.saveMosaic(kcollection, fname, header='class labels', footer='iter: {:4g}, # active classes: {}'.format(
                 ss_iter, numActiveClasses()), cmap="tab20", colorbar=True, remap_values=True)
 
             # DEBUG
             if verbose >= 3:
-                tcollection = [fileio.unmask(t_coll[j].value, masks[j], fill_value=-1, channels=1).reshape(sizes[j]) for j in range(Nj)]
+                tcollection = makeTMaps(mode=False)
                 fname = os.path.join(p_figs, 'iter_{:04}_t_value'.format(ss_iter))
                 fileio.saveMosaic(tcollection, fname, header='region labels', footer='iter: {}'.format(ss_iter), cmap="tab20b", colorbar=True, remap_values=True)
 
-                kcollection = [helpers.constructfullKMap(tcollection[j], k_coll[j].value) for j in range(Nj)]
+                kcollection = makeKMaps(tcollection=tcollection, mode=False)
                 fname = os.path.join(p_figs, 'iter_{:04}_k_value'.format(ss_iter))
                 fileio.saveMosaic(kcollection, fname, header='class labels', footer='iter: {:4g}, # active classes: {}'.format(
                     ss_iter, numActiveClasses()), cmap="tab20", colorbar=True, remap_values=True)
@@ -285,10 +332,11 @@ def execute(root='.', data_root=None):
                         )
 
             # save tracked history plots
-            try: savePlots()
-            except Exception as e: logger.error('failed to save plots\n{}'.format(e))
-            try: saveImages()
-            except Exception as e: logger.error('failed to save cluster maps\n{}'.format(e))
+            if visualize:
+                try: savePlots()
+                except Exception as e: logger.error('failed to save plots\n%s', e)
+                try: saveImages()
+                except Exception as e: logger.error('failed to save cluster maps\n%s', e)
 
             # save data to file
             try:
@@ -296,9 +344,9 @@ def execute(root='.', data_root=None):
                 with open(fname, 'wb') as f:
                     pickle.dump([dataset, ss_iter, hist_numclasses, hist_numclasses_active,\
                                  docs, masks, sizes, fnames, dim, t_coll, k_coll, evidence, m, n], f)
-                    logger.info('data saved to "{}"'.format(fname))
+                    logger.info('data saved to "%s"', fname)
             except Exception as e:
-                logger.error('failed to save checkpoint data\n{}'.format(e))
+                logger.error('failed to save checkpoint data\n%s', e)
 
         # register SIGINT handler (ctrl-c)
         exit_signal_recieved = False
@@ -320,7 +368,7 @@ def execute(root='.', data_root=None):
         #==========#
         for _ in range(ss_iter, maxiter):
             ss_iter += 1
-            logger.debug('Beginning Sampling Iteration {}'.format(ss_iter))
+            logger.debug('Beginning Sampling Iteration %d', ss_iter)
 
             # generate random permutation over document indices and iterate
             jpermutation = rand.permutation(Nj)
@@ -334,21 +382,21 @@ def execute(root='.', data_root=None):
                 for i in ipermutation:
                     data = docs[j][i,:]
                     #  if data.mask.any(): continue
-                    logger.debug3('ss_iter={}, j={}, i={}'.format(ss_iter, j, i))
+                    logger.debug3('ss_iter=%d, j=%d, i=%d', ss_iter, j, i)
 
                     m_items = [0]*len(m)
                     for jj in range(Nj):
                         for tt in range(len(n[jj])):
-                            m_items[k_coll[jj].value[tt]] += n[jj][tt]
+                            if not isGroupEmpty(jj, tt):
+                                m_items[k_coll[jj].value[tt]] += n[jj][tt]
                     if [e.count for e in evidence] != m_items:
-                        logger.debug3("Evidence counts and m, n containers do not agree\n" +
-                                             "total data: {}\n".format(np.sum([e.count for e in evidence])) +
-                                             "data in evidence: {}\n".format([e.count for e in evidence]) +
-                                             "data in m: {}\n".format(m_items) +
-                                             "m: {}\n".format(m) +
-                                             "n[j]: {}\n".format(n[j]) +
-                                             "k_coll[j].value: {}".format(k_coll[j].value) )
-                        #  raise RuntimeError()
+                        raise RuntimeError("Evidence counts and m, n containers do not agree\n" +
+                                           "total data: {}\n".format(np.sum([e.count for e in evidence])) +
+                                           "data in evidence: {}\n".format([e.count for e in evidence]) +
+                                           "data in m: {}\n".format(m_items) +
+                                           "m: {}\n".format(m) +
+                                           "n[j]: {}\n".format(n[j]) +
+                                           "k_coll[j].value: {}".format(k_coll[j].value) )
 
                     # get previous assignments
                     tprev = t_coll[j].value[i]
@@ -357,17 +405,16 @@ def execute(root='.', data_root=None):
                     # remove count from group tprev, class kprev
                     n[j][tprev] -= 1
                     evidence[kprev].remove(data)
-                    logger.debug3('n[{}][{}]-- -> {}'.format(j, tprev, n[j][tprev]))
+                    logger.debug3('n[%d][%d]-- -> %d', j, tprev, n[j][tprev])
                     # handle empty group in doc j
                     if isGroupEmpty(j, tprev):
-                        logger.debug2('Group {} in doc {} emptied'.format(tprev, j))
+                        logger.debug2('Group %d in doc %d emptied', tprev, j)
                         n[j][tprev] = 0 # probably not necessary
+                        k_coll[j].value[tprev] = np.nan # remains forever
                         m[kprev] -= 1
-
                         # handle empty global cluster
                         if isClassEmpty(kprev):
-                            m[kprev] = 0
-                            logger.debug2('Class {} emptied'.format(kprev))
+                            removeClass(kprev)
 
                     # SAMPLING
                     # sample tnext
@@ -375,28 +422,30 @@ def execute(root='.', data_root=None):
                     Nk = numClasses()
                     logMargL = np.zeros((Nk,))
                     for kk in range(Nk):
-                        if isClassEmpty(kk): continue
+                        if isClassEmpty(kk):
+                            logMargL[kk] = np.NINF
+                            continue
                         logMargL[kk] = evidence[kk].logMarginalLikelihood(data)
                     logMargL_prior = prior.logMarginalLikelihood(data)
                     mrf_args = (i, t_coll[j].value, sizes[j], mrf_lbd, k_coll[j].value) if mrf_lbd != 0 else None
                     tnext = helpers.sampleT(n[j], k_coll[j].value, m+[hp_gamma], hp_a0, logMargL, logMargL_prior, mrf_args)
                     t_coll[j].value[i] = tnext
-                    logger.debug3('tnext={} of [0..{}] (Nt={}, {} empty)'.format( tnext, Nt-1, Nt, Nt-numActiveGroups(j) ))
+                    logger.debug3('tnext=%d of [0..%d] (Nt=%d, %d empty)',  tnext, Nt-1, Nt, Nt-numActiveGroups(j))
                     if tnext >= Nt:
                         # conditionally sample knext for tnext=tnew
                         n[j].append(1)
-                        logger.debug2('new group created: t[{}][{}]; {} active groups in doc {} (+{} empty)'.format(
-                            j, tnext, numActiveGroups(j), j, Nt+1-numActiveGroups(j) ))
+                        logger.debug2('new group created: t[%d][%d]; %d active groups in doc %d (+%d empty)',
+                            j, tnext, numActiveGroups(j), j, Nt+1-numActiveGroups(j) )
                         knext = helpers.sampleK(m+[hp_gamma], logMargL, logMargL_prior)
                         k_coll[j].value.append(knext)
-                        logger.debug3('knext={} of [0..{}] ({} empty)'.format(knext, Nk-1, Nk-numActiveClasses()))
+                        logger.debug3('knext=%d of [0..%d] (%d empty)', knext, Nk-1, Nk-numActiveClasses())
                         if knext >= Nk: createNewClass()
                         else: m[knext] += 1
-                        logger.debug3('m[{}]++ -> {}'.format(knext, m[knext]))
+                        logger.debug3('m[%d]++ -> %d', knext, m[knext])
                     else:
                         n[j][tnext] += 1
                         knext = k_coll[j].value[tnext]
-                        logger.debug3('n[{}][{}]++ -> {}'.format(j, tnext, n[j][tnext]))
+                        logger.debug3('n[%d][%d]++ -> %d', j, tnext, n[j][tnext])
                     evidence[knext].insert(data)
                     logger.debug3('')
 
@@ -412,19 +461,27 @@ def execute(root='.', data_root=None):
                     #     product of individual data item margLikelihoods
                     Nk=numClasses()
                     kprev = k_coll[j].value[t]
+                    if assert_on and not 0<=kprev<Nk: raise RuntimeError('kprev={} is not within valid range: [0, {}]'.format(kprev, Nk-1))
+                    if assert_on and m[kprev] <= 0:
+                        raise RuntimeError("trying to subtract from already empty class: \nm:{}\nk:{}\nk_coll:{}".format(m, kprev, k_coll[j].value))
                     m[kprev] -= 1
 
                     # remove all data items from evidence of k_t
                     evidence_copy = evidence[kprev].copy()
                     data_t = docs[j][t_coll[j].value==t, :]
-                    for data in data_t:
-                        #  if data.mask.any(): continue
-                        evidence_copy.remove(data)
+                    evidence_copy.remove(data_t)
+
+                    if isClassEmpty(kprev):
+                        removeClass(kprev)
+                        if assert_on and evidence_copy.count != 0:
+                            raise RuntimeError("evidence for kprev={}: {!s}".format(kprev, evidence_copy))
 
                     # compute joint marginal likelihoods for data in group tnext
                     jointLogMargL = np.zeros((Nk,))
                     for kk in range(Nk):
-                        if isClassEmpty(kk): continue
+                        if isClassEmpty(kk):
+                            jointLogMargL[kk] = np.NINF
+                            continue
                         jointLogMargL[kk] = (evidence_copy if kk==kprev else evidence[kk]).jointLogMarginalLikelihood(data_t)
                     jointLogMargL_prior = prior.jointLogMarginalLikelihood(data_t)
                     knext = helpers.sampleK(m+[hp_gamma], jointLogMargL, jointLogMargL_prior)
@@ -433,12 +490,11 @@ def execute(root='.', data_root=None):
 
                     # we can use reduced evidence as new evidence for kprev and add data to evidence for knext
                     # if knext=kprev, we just leave the unmodified evidence object in place and do nothing
-                    if knext != kprev:
+                    if kprev != knext:
                         k_coll[j].value[t] = knext
                         evidence[kprev] = evidence_copy
-                        for data in data_t:
-                            #  if data.mask.any(): continue
-                            evidence[knext].insert(data)
+                        evidence[knext].insert(data_t)
+                    else: del evidence_copy
 
                     if exit_signal_recieved: exit_early()
                 # END group loop
@@ -449,12 +505,13 @@ def execute(root='.', data_root=None):
             hist_numclasses.append(numClasses())
 
             # write current results
-            if visualize:
-                make_class_maps()
+            if visualize: make_class_maps()
             if exit_signal_recieved: exit_early()
 
         # log summary, generate plots, save checkpoint data
         cleanup()
+        kcollection = makeKMaps(mode=True)
+        return (kcollection, )
 
     except Exception as e:
         msg = 'Exception occured: {!s}'.format(e)

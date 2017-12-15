@@ -11,7 +11,7 @@ def handle_math_error(x, op):
         logger.warning('{} for operation: {}({})'.format(e, op.__name__, x))
         return float('inf')
     except Exception as e:
-        logger.error('{} for operation: {}({})'.format(e.__class__.__name_, op.__name__, x))
+        logger.error('{} for operation: {}({})'.format(e.__class__, op.__name__, x))
         raise e
 
 def log(x):

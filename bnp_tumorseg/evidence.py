@@ -54,6 +54,7 @@ class ModelEvidenceNIW():
         self._mu    = mu
         self._U     = cholesky(cov + k*np.outer(mu, mu)).T
         if U is not None: self._U = np.atleast_2d(U)
+        self.enabled = True
 
         # caching
         self._cache = {}
@@ -95,31 +96,38 @@ class ModelEvidenceNIW():
         self._mu  = self._mu - (x-self._mu)/self._k
         choldate.choldowndate(self._U, np.copy(x))
 
+    def disable(self):
+        """throw error when making changes to disabled object"""
+        self.enabled = False
+
+    def enable(self):
+        self.enabled = True
+
     def copy(self):
         new = deepcopy(self)
         assert self._U is not new._U
         return new
 
     def insert(self, x):
-        x = np.atleast_1d(np.squeeze(x))
+        if not self.enabled: raise RuntimeError('attempted to modify disabled {} object'.format(__class__.__name__))
         if x.ndim <= 1:
             self._insertOne(x)
         elif x.ndim == 2:
             for item in x:
-                self._insertOne(x)
+                self._insertOne(item)
         else:
             raise ValueError('input "{}" must have ndim == 1 or 2 not {}'.format(x, x.ndim))
         self._resetCache()
 
     def remove(self, x):
+        if not self.enabled: raise RuntimeError('attempted to modify disabled {} object'.format(__class__.__name__))
         if self._count <=0:
             raise RuntimeError('This {} has no data items to remove'.format(self.__class__.__name__))
-        x = np.atleast_1d(np.squeeze(x))
         if x.ndim <= 1:
             self._removeOne(x)
         elif x.ndim == 2:
             for item in x:
-                self._removeOne(x)
+                self._removeOne(item)
         else:
             raise ValueError('input "{}" must have ndim == 1 or 2 not {}'.format(x, x.ndim))
         self._resetCache()
@@ -195,19 +203,6 @@ class ModelEvidenceNIW():
         t2 = - 0.5*(d*log(nu*pi) + choleskyLogDet(L))
         t3 = - (0.5*(n+1))*log(1+(1/nu)*choleskyQuadForm(L, x-mu))
         tdensln = t1 + t2 + t3
-        #TODO REMOVE DEBUG
-        #  tdens = exp(tdensln)
-        #  msg = "tdensln: {}\n".format(tdensln) + \
-        #  "gammln1: {}\n".format(gammaln(0.5*(n+1))) + \
-        #  "gammln2: {}\n".format(gammaln(0.5*(nu))) + \
-        #  "chollogdet: {}\n".format(choleskyLogDet(L)) + \
-        #  "L: {}\n".format(L) +\
-        #  "diag(L): {}\n".format(np.diagonal(L)) +\
-        #  "term 1: {}\n".format(t1+t2) + \
-        #  "term 3: {}\n".format(t3) + \
-        #  "tdens:  {}".format(tdens)
-        #  print(msg)
-        #TODO REMOVE END DEBUG
         if not tdensln<=0:
             tdens = exp(tdensln)
             msg = \

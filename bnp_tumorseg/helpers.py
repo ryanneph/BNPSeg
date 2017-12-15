@@ -18,18 +18,11 @@ def sampleCatDist(wts):
     # check for invalid params
     if not ((0<=wts).all and (wts<=1).all() and math.isclose(np.sum(wts), 1)):
         raise RuntimeError("invalid categorical weights vector: {}".format(str(wts)))
-    logger.debug3("weights: {}".format(wts))
+    logger.debug3('weights: %s', wts)
     return np.nonzero(rand.multinomial(1, wts))[0][0]
 
 def sampleDirDist(alpha):
-    """draw random sample from dirichlet distribution parameterized by a vector of +reals
-
-    Args:
-        alpha (np.ndarray): vector of positive reals
-
-    Returns:
-        np.ndarray with same size as input vector
-    """
+    """draw random sample from dirichlet distribution parameterized by a vector of +reals """
     return rand.dirichlet(alpha).tolist()
 
 def logLikelihoodTnew(beta, logMargL, logMargL_prior):
@@ -45,6 +38,7 @@ def logLikelihoodTnew(beta, logMargL, logMargL_prior):
     a = np.zeros((len(beta), ))
     for k in range(len(beta)-1):
         if beta[k] <= 0:
+            a[k] = np.NINF
             continue
         a[k] = log(beta[k]) + logMargL[k]
     a[-1] = log(beta[-1]) + logMargL_prior
@@ -72,6 +66,9 @@ def sampleT(n_j, k_j, beta, a0, logMargL, logMargL_prior, mrf_args=None):
     Nt = len(n_j)
     logwts = np.zeros((Nt+1,))
     for t in range(Nt):
+        if n_j[t] <= 0:
+            logwts[t] = np.NINF
+            continue
         logwts[t] = log(n_j[t]) + logMargL[k_j[t]] # t=texist
         if mrf_args is not None:
             logwts[t] += logMRF(t, *mrf_args)
@@ -87,6 +84,9 @@ def sampleK(beta, logMargL, logMargL_prior, mrf_args=None):
     Nk = len(beta)-1
     logwts = np.zeros((Nk+1,))
     for k in range(Nk):
+        if beta[k] <= 0:
+            logwts[k] = np.NINF
+            continue
         logwts[k] = log(beta[k]) + logMargL[k] # k=kexist
         if mrf_args is not None:
             logwts[k] += logMRF(k, *mrf_args)
