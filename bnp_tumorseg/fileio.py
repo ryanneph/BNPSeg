@@ -167,8 +167,8 @@ def normalize(collection):
     if not isinstance(collection, list): collection = [collection]
     dim = collection[0].shape[-1]
     for d in range(dim):
-        smin = 9999.0
-        smax = -9999.0
+        smin = sys.float_info.max
+        smax = sys.float_info.min
         for im in collection:
             _min = np.min(im[:,d])
             _max = np.max(im[:,d])
@@ -178,6 +178,15 @@ def normalize(collection):
 
         for im in collection:
             im[:,d] = (im[:,d] - smin) / (smax-smin)
+    for d in range(dim):
+        smin = sys.float_info.max
+        smax = sys.float_info.min
+        for im in collection:
+            _min = np.min(im[:,d])
+            _max = np.max(im[:,d])
+            if _min < smin: smin = _min
+            if _max > smax: smax = _max
+        logger.debug3('channel #{}: min={}, max={}'.format(d, smin, smax))
     if len(collection) == 1: return collection[0]
     else: return collection
 

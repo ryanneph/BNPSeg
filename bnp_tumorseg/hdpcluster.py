@@ -145,7 +145,7 @@ def execute(root='.', data_root=None):
             _docs, _masks, sizes, fnames, dim = fileio.loadImageSet(datapath, ftype=ftype, resize=resamplefactor)
             if len(_docs) < 1: raise RuntimeError('No images were loaded')
             docs, masks = fileio.mask(_docs, masks=_masks, maskval=maskval)
-            docs = fileio.normalize(docs)
+            #  docs = fileio.normalize(docs)
         Nj = len(docs)                       # number of images
         Ni = [doc.shape[0] for doc in docs]  # list of image sizes (linear)
         if visualize:
@@ -212,6 +212,7 @@ def execute(root='.', data_root=None):
                     n[j][r] += 1
                     t_coll[j].value[i] = r
             logger.debug("finished adding all data items to initial class")
+            for e in evidence: print(e)
 
             # history tracking variables
             hist_numclasses        = []
@@ -332,11 +333,10 @@ def execute(root='.', data_root=None):
                         )
 
             # save tracked history plots
-            if visualize:
-                try: savePlots()
-                except Exception as e: logger.error('failed to save plots\n%s', e)
-                try: saveImages()
-                except Exception as e: logger.error('failed to save cluster maps\n%s', e)
+            try: savePlots()
+            except Exception as e: logger.error('failed to save plots\n%s', e)
+            try: saveImages()
+            except Exception as e: logger.error('failed to save cluster maps\n%s', e)
 
             # save data to file
             try:
